@@ -8,6 +8,7 @@ import Notification from "../models/Notification.js";
 import User from "../models/User.js";
 import { logAuditEvent } from "../utils/auditLogger.js";
 import { notifyEligibleStudentsOnTestPublish } from "./testController.js";
+import { ALLOWED_DEPARTMENTS, normalizeDepartment } from "../config/departments.js";
 
 export const getCoordinatorDashboard = async (req, res) => {
     try {
@@ -708,8 +709,114 @@ export const getImportHistory = async (req, res) => {
 };
 
 // ==========================================
-// MOCK TEST MONITORING & MANAGEMENT
+// MOCK TEST MONITORING & MANAGEMENT (WITH AUTHORIZATION)
 // ==========================================
+
+export function isArrayUnrestricted(arr, allowedTokens = ['all', 'all departments', 'all batches']) {
+    if (!arr || !Array.isArray(arr) || arr.length === 0) return true;
+    return arr.every((item) => {
+        if (typeof item !== 'string') return false;
+        const trimmed = item.trim().toLowerCase();
+        return allowedTokens.includes(trimmed);
+    });
+}
+
+const allowedDeptTokens = [/^all$/i, /^all departments$/i];
+const allowedBatchTokens = [/^all$/i, /^all batches$/i];
+
+export const openInstitutionalQuery = {
+    $and: [
+        {
+            $or: [
+                { createdBy: null },
+                { createdBy: { $exists: false } }
+            ]
+        },
+        {
+            $or: [
+                { assignedDepartments: { $exists: false } },
+                { assignedDepartments: { $size: 0 } },
+                { assignedDepartments: { $not: { $elemMatch: { $nin: allowedDeptTokens } } } }
+            ]
+        },
+        {
+            $or: [
+                { assignedBatches: { $exists: false } },
+                { assignedBatches: { $size: 0 } },
+                { assignedBatches: { $not: { $elemMatch: { $nin: allowedBatchTokens } } } }
+            ]
+        }
+    ]
+};
+
+const baseActiveStatusFilter = {
+    isActive: { $ne: false },
+    status: { $ne: 'archived' }
+};
+
+export function getAuthorizedMockTestFilter(user) {
+    if (!user) return { _id: null };
+
+    if (user.role === 'admin') {
+        return { ...baseActiveStatusFilter };
+    }
+
+    if (user.role !== 'coordinator') {
+        return { _id: null };
+    }
+
+    const userId = user._id || user.id;
+    const userDept = typeof user.department === 'string' ? user.department.trim() : '';
+    const escapedDept = userDept.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const exactDeptRegex = userDept ? new RegExp(`^${escapedDept}$`, 'i') : null;
+
+    return {
+        ...baseActiveStatusFilter,
+        $or: [
+            ...(userId ? [{ createdBy: userId }] : []),
+            ...(exactDeptRegex ? [{ assignedDepartments: exactDeptRegex }] : []),
+            openInstitutionalQuery
+        ]
+    };
+}
+
+export function isUserAuthorizedForMockTest(user, test) {
+    if (!user || !test) return false;
+
+    // 1. Strict consistency: Inactive or archived tests are denied for all roles (including admins)
+    if (test.isActive === false || test.status === 'archived') {
+        return false;
+    }
+
+    // 2. Admin access for active, non-archived tests
+    if (user.role === 'admin') return true;
+    if (user.role !== 'coordinator') return false;
+
+    const testCreatorId = test.createdBy ? (test.createdBy._id ? String(test.createdBy._id) : String(test.createdBy)) : null;
+    const userId = user._id ? String(user._id) : (user.id ? String(user.id) : null);
+
+    // 3. Coordinator author ownership (handles populated or unpopulated createdBy)
+    if (testCreatorId && userId && testCreatorId === userId) {
+        return true;
+    }
+
+    // 4. Coordinator department exact match (case-insensitive)
+    const userDept = typeof user.department === 'string' ? user.department.trim().toLowerCase() : '';
+    if (userDept && Array.isArray(test.assignedDepartments)) {
+        const hasDeptMatch = test.assignedDepartments.some((d) => {
+            if (typeof d !== 'string') return false;
+            return d.trim().toLowerCase() === userDept;
+        });
+        if (hasDeptMatch) return true;
+    }
+
+    // 5. Open institutional test: createdBy must be null/missing AND BOTH departments and batches must be unrestricted
+    const isDeptsOpen = isArrayUnrestricted(test.assignedDepartments, ['all', 'all departments']);
+    const isBatchesOpen = isArrayUnrestricted(test.assignedBatches, ['all', 'all batches']);
+    const isInstitutional = (!testCreatorId) && isDeptsOpen && isBatchesOpen;
+
+    return isInstitutional;
+}
 
 export const getMockTestMonitoring = async (req, res) => {
     try {
@@ -718,7 +825,10 @@ export const getMockTestMonitoring = async (req, res) => {
         const limitNum = Math.min(100, Math.max(1, parseInt(limit, 10) || 20));
         const skip = (pageNum - 1) * limitNum;
 
-        const filter = { isActive: true };
+        // Scoped by authenticated user's authorized mock tests
+        const authorizedFilter = getAuthorizedMockTestFilter(req.user);
+        const filter = { ...authorizedFilter };
+
         if (category && category !== "all" && category !== "All" && category !== "undefined" && category !== "null") {
             filter.category = new RegExp(category, "i");
         }
@@ -727,28 +837,38 @@ export const getMockTestMonitoring = async (req, res) => {
         }
         if (search && search !== "undefined" && search !== "null" && search.trim()) {
             const s = search.trim();
-            filter.$or = [
+            const searchOr = [
                 { title: { $regex: s, $options: "i" } },
                 { company: { $regex: s, $options: "i" } },
                 { category: { $regex: s, $options: "i" } },
             ];
+            if (filter.$and) {
+                filter.$and.push({ $or: searchOr });
+            } else {
+                filter.$and = [{ $or: searchOr }];
+            }
         }
 
         const now = new Date();
         if (status === "draft") {
             filter.status = "draft";
         } else if (status === "upcoming") {
-            filter.status = { $ne: "draft" };
+            filter.status = { $ne: "draft", $ne: "archived" };
             filter.startDate = { $gt: now };
         } else if (status === "closed" || status === "expired") {
-            filter.status = { $ne: "draft" };
+            filter.status = { $ne: "draft", $ne: "archived" };
             filter.endDate = { $lt: now };
         } else if (status === "active") {
-            filter.status = { $ne: "draft" };
-            filter.$and = [
+            filter.status = { $ne: "draft", $ne: "archived" };
+            const activeRange = [
                 { $or: [{ startDate: null }, { startDate: { $lte: now } }] },
                 { $or: [{ endDate: null }, { endDate: { $gte: now } }] },
             ];
+            if (filter.$and) {
+                filter.$and.push(...activeRange);
+            } else {
+                filter.$and = activeRange;
+            }
         } else if (status === "completed") {
             const completedMockTestIds = await Attempt.distinct("mockTest", { type: "mock-test", status: "completed" });
             filter._id = { $in: completedMockTestIds };
@@ -911,6 +1031,13 @@ export const getMockTestDetail = async (req, res) => {
             });
         }
 
+        if (!isUserAuthorizedForMockTest(req.user, test)) {
+            return res.status(403).json({
+                success: false,
+                message: "Access denied: You are not authorized to view this mock test or it has been archived/deactivated",
+            });
+        }
+
         const [totalAttempts, completedCount, inProgressCount, avgStats] = await Promise.all([
             Attempt.countDocuments({ mockTest: test._id, type: "mock-test" }),
             Attempt.countDocuments({ mockTest: test._id, type: "mock-test", status: "completed" }),
@@ -987,16 +1114,37 @@ export const getMockTestDetail = async (req, res) => {
 export const getMockTestAttempts = async (req, res) => {
     try {
         const { id } = req.params;
-        const { search, status, page = 1, limit = 20, dateFrom, dateTo } = req.query;
+        const { search, status, department, page = 1, limit = 20, dateFrom, dateTo } = req.query;
 
         const pageNum = Math.max(1, parseInt(page, 10) || 1);
         const limitNum = Math.min(100, Math.max(1, parseInt(limit, 10) || 20));
         const skip = (pageNum - 1) * limitNum;
 
         const filter = {
-            mockTest: new mongoose.Types.ObjectId(id),
             type: "mock-test",
         };
+
+        let authorizedTestIds = [];
+        if (id === "all") {
+            const authorizedFilter = getAuthorizedMockTestFilter(req.user);
+            authorizedTestIds = await MockTest.find(authorizedFilter).distinct("_id");
+            filter.mockTest = { $in: authorizedTestIds };
+        } else {
+            const test = await MockTest.findById(id);
+            if (!test) {
+                return res.status(404).json({
+                    success: false,
+                    message: "Mock test not found",
+                });
+            }
+            if (!isUserAuthorizedForMockTest(req.user, test)) {
+                return res.status(403).json({
+                    success: false,
+                    message: "Access denied: You are not authorized to view attempts for this mock test",
+                });
+            }
+            filter.mockTest = test._id;
+        }
 
         if (status && status !== "all" && status !== "undefined" && status !== "null") {
             filter.status = status;
@@ -1010,16 +1158,36 @@ export const getMockTestAttempts = async (req, res) => {
             if (validDateTo) filter.createdAt.$lte = new Date(validDateTo);
         }
 
+        const studentQuery = { role: "student" };
+        let hasStudentQuery = false;
+
+        if (department && department !== "all" && department !== "All" && department !== "undefined" && department !== "null") {
+            hasStudentQuery = true;
+            const deptClean = department.trim();
+            const deptRegex = new RegExp(deptClean.replace(/\s*engineering$/i, ""), "i");
+            if (deptClean.toLowerCase() === "e & tc") {
+                studentQuery.department = { $regex: /e\s*&\s*tc|etc|telecom|communication/i };
+            } else if (deptClean.toLowerCase() === "aids") {
+                studentQuery.department = { $regex: /aids|ai\s*&\s*ds|artificial intelligence/i };
+            } else if (deptClean.toLowerCase() === "csd") {
+                studentQuery.department = { $regex: /csd|cs\s*&\s*design|design/i };
+            } else {
+                studentQuery.department = { $regex: deptRegex };
+            }
+        }
+
         if (search && search !== "undefined" && search !== "null" && search.trim()) {
+            hasStudentQuery = true;
             const s = search.trim();
-            const matchingUsers = await User.find({
-                role: "student",
-                $or: [
-                    { name: { $regex: s, $options: "i" } },
-                    { email: { $regex: s, $options: "i" } },
-                    { studentId: { $regex: s, $options: "i" } },
-                ],
-            }).select("_id");
+            studentQuery.$or = [
+                { name: { $regex: s, $options: "i" } },
+                { email: { $regex: s, $options: "i" } },
+                { studentId: { $regex: s, $options: "i" } },
+            ];
+        }
+
+        if (hasStudentQuery) {
+            const matchingUsers = await User.find(studentQuery).select("_id");
             filter.student = { $in: matchingUsers.map((u) => u._id) };
         }
 
@@ -1035,28 +1203,29 @@ export const getMockTestAttempts = async (req, res) => {
             Attempt.countDocuments(filter),
         ]);
 
-        // Calculate attempt number for each student for this specific test
+        // Calculate attempt number for each student for this test context
         const studentIds = Array.from(new Set(attempts.map((a) => a.student?._id?.toString()).filter(Boolean)));
         const allStudentAttempts = await Attempt.find({
-            mockTest: id,
+            mockTest: id === "all" ? { $in: authorizedTestIds } : id,
             student: { $in: studentIds },
         })
             .sort({ createdAt: 1 })
-            .select("_id student createdAt")
+            .select("_id student mockTest createdAt")
             .lean();
 
         const studentAttemptCountMap = new Map();
         allStudentAttempts.forEach((att) => {
-            const sId = att.student.toString();
-            if (!studentAttemptCountMap.has(sId)) {
-                studentAttemptCountMap.set(sId, []);
+            const key = id === "all" ? `${att.student}_${att.mockTest}` : att.student.toString();
+            if (!studentAttemptCountMap.has(key)) {
+                studentAttemptCountMap.set(key, []);
             }
-            studentAttemptCountMap.get(sId).push(att._id.toString());
+            studentAttemptCountMap.get(key).push(att._id.toString());
         });
 
         const formattedAttempts = attempts.map((att) => {
             const sId = att.student?._id?.toString();
-            const list = studentAttemptCountMap.get(sId) || [];
+            const key = id === "all" ? `${sId}_${att.mockTest?._id || att.mockTest}` : sId;
+            const list = studentAttemptCountMap.get(key) || [];
             const attemptNumber = list.indexOf(att._id.toString()) + 1 || 1;
 
             return {
@@ -1207,9 +1376,45 @@ export const assignMockTest = async (req, res) => {
 // STUDENT MANAGEMENT & PERFORMANCE
 // ==========================================
 
+export const getDepartmentMatchRegexes = (dept) => {
+    if (!dept || typeof dept !== "string" || dept.toLowerCase() === "all") return [];
+    const lower = dept.trim().toLowerCase();
+    if (lower === "computer engineering") {
+        return [/computer engineering/i, /computer science/i, /^cse$/i];
+    }
+    if (lower === "e & tc") {
+        return [/e & tc/i, /electronics/i, /^entc$/i, /^etc$/i, /^ece$/i];
+    }
+    if (lower === "information technology") {
+        return [/information technology/i, /^it$/i];
+    }
+    if (lower === "aids") {
+        return [/aids/i, /ai & ds/i, /artificial intelligence/i, /data science/i];
+    }
+    if (lower === "csd") {
+        return [/csd/i, /cs & design/i, /computer science and design/i];
+    }
+    if (lower === "mechanical") {
+        return [/mechanical/i, /^mech$/i];
+    }
+    if (lower === "civil") {
+        return [/civil/i];
+    }
+    if (lower === "electrical") {
+        return [/electrical/i, /^ee$/i];
+    }
+    if (lower === "chemical") {
+        return [/chemical/i];
+    }
+    if (lower === "robotics and automation") {
+        return [/robotics/i, /automation/i];
+    }
+    return [new RegExp(dept.trim(), "i")];
+};
+
 export const getCoordinatorStudents = async (req, res) => {
     try {
-        const { search, department, graduationYear, page = 1, limit = 20 } = req.query;
+        const { search, department, graduationYear, testId, page = 1, limit = 20 } = req.query;
 
         const pageNum = Math.max(1, parseInt(page, 10) || 1);
         const limitNum = Math.min(100, Math.max(1, parseInt(limit, 10) || 20));
@@ -1217,12 +1422,54 @@ export const getCoordinatorStudents = async (req, res) => {
 
         const filter = { role: "student" };
 
+        if (testId && testId !== "all" && testId !== "undefined" && testId !== "null") {
+            const test = await MockTest.findById(testId);
+            if (!test) {
+                return res.status(404).json({
+                    success: false,
+                    message: "Mock test not found",
+                });
+            }
+            if (!isUserAuthorizedForMockTest(req.user, test)) {
+                return res.status(403).json({
+                    success: false,
+                    message: "Access denied: You are not authorized to access students for this mock test",
+                });
+            }
+
+            if (test.assignedStudents && test.assignedStudents.length > 0) {
+                filter._id = { $in: test.assignedStudents };
+            } else {
+                const depts = (test.assignedDepartments && test.assignedDepartments.length > 0)
+                    ? test.assignedDepartments
+                    : (test.assignedBatches || []).filter((b) => isNaN(parseInt(b, 10)) && b.toLowerCase() !== 'all' && b.toLowerCase() !== 'all batches');
+
+                const isDeptsOpen = isArrayUnrestricted(depts, ['all', 'all departments']);
+                if (!isDeptsOpen && depts.length > 0) {
+                    const deptPatterns = depts.map((d) => new RegExp('^' + d.trim() + '$', 'i'));
+                    filter.department = { $in: deptPatterns };
+                }
+
+                const years = (test.assignedBatches || [])
+                    .map((b) => parseInt(b, 10))
+                    .filter((n) => !isNaN(n));
+                if (years.length > 0) {
+                    filter.graduationYear = { $in: years };
+                }
+            }
+        }
+
         if (department && department !== "all" && department !== "All" && department !== "undefined" && department !== "null") {
-            filter.department = new RegExp(department, "i");
+            const regexes = getDepartmentMatchRegexes(department);
+            if (regexes.length > 0) {
+                filter.department = { $in: regexes };
+            }
         }
         if (graduationYear && graduationYear !== "all" && graduationYear !== "undefined" && graduationYear !== "null") {
             const yearNum = parseInt(graduationYear, 10);
-            if (!isNaN(yearNum)) filter.graduationYear = yearNum;
+            if (!isNaN(yearNum)) {
+                filter.graduationYear = { $in: [yearNum, String(yearNum)] };
+            }
         }
         if (search && search !== "undefined" && search !== "null" && search.trim()) {
             const s = search.trim();
@@ -1299,10 +1546,18 @@ export const getCoordinatorStudents = async (req, res) => {
             };
         });
 
+        const dbYears = await User.distinct("graduationYear", { role: "student" });
+        const availableYears = Array.from(new Set(
+            (dbYears || [])
+                .filter((y) => y !== null && y !== undefined && String(y).trim())
+                .map((y) => String(y).trim())
+        )).sort((a, b) => b.localeCompare(a));
+
         return res.json({
             success: true,
             message: "Coordinator students retrieved successfully",
             data: formattedStudents,
+            availableYears,
             pagination: {
                 total,
                 page: pageNum,
@@ -1518,11 +1773,26 @@ export const getCoordinatorAnalytics = async (req, res) => {
             };
         });
 
-        // 3. Test-wise comparison stats
-        const testComparison = await MockTest.find({ isActive: true })
-            .select("title category company durationMinutes totalQuestions attemptsCount averageScore")
-            .limit(10)
+        // 3. Test-wise comparison stats scoped to authorized mock tests
+        const authorizedFilter = getAuthorizedMockTestFilter(req.user);
+        const rawTestComparison = await MockTest.find(authorizedFilter)
+            .select("title category company durationMinutes totalQuestions attemptsCount averageScore averageAccuracy")
+            .limit(20)
             .lean();
+
+        const testComparison = rawTestComparison.map((t) => {
+            const totQ = t.totalQuestions || 0;
+            const avgSc = t.averageScore || 0;
+            const calcAcc = totQ > 0 && avgSc > 0 ? Math.min(100, Math.round((avgSc / totQ) * 100)) : 0;
+            return {
+                ...t,
+                averageAccuracy: t.averageAccuracy != null ? t.averageAccuracy : calcAcc,
+            };
+        });
+
+        const overallAverageAccuracy = testComparison.length > 0
+            ? Math.round(testComparison.reduce((sum, t) => sum + (t.averageAccuracy || 0), 0) / testComparison.length)
+            : 0;
 
         return res.json({
             success: true,
@@ -1533,6 +1803,7 @@ export const getCoordinatorAnalytics = async (req, res) => {
                 weakTopics,
                 atRiskStudents,
                 testComparison,
+                overallAverageAccuracy,
             },
         });
     } catch (error) {
@@ -1603,616 +1874,621 @@ export const exportResultsCsv = async (req, res) => {
             return `"${str.replace(/"/g, '""')}"`;
         };
 
-        const rows = attempts.map((a) => [
-            escapeCsv(a._id),
-            escapeCsv(a.student?.name || "N/A"),
-            escapeCsv(a.student?.email || "N/A"),
-            escapeCsv(a.student?.studentId || "N/A"),
-            escapeCsv(a.student?.department || "N/A"),
-            escapeCsv(a.student?.graduationYear || "N/A"),
-            escapeCsv(a.title || a.mockTest?.title || "Mock Test"),
-            escapeCsv(a.status),
-            escapeCsv(a.score ?? 0),
-            escapeCsv(a.totalMarks ?? 0),
-            escapeCsv(a.accuracy ?? 0),
-            escapeCsv(a.result || "N/A"),
-            escapeCsv(a.timeSpentSeconds || 0),
-            escapeCsv(a.startTime ? new Date(a.startTime).toISOString() : ""),
-            escapeCsv(a.endTime ? new Date(a.endTime).toISOString() : ""),
-        ]);
+            const rows = attempts.map((a) => [
+                escapeCsv(a._id),
+                escapeCsv(a.student?.name || "N/A"),
+                escapeCsv(a.student?.email || "N/A"),
+                escapeCsv(a.student?.studentId || "N/A"),
+                escapeCsv(a.student?.department || "N/A"),
+                escapeCsv(a.student?.graduationYear || "N/A"),
+                escapeCsv(a.title || a.mockTest?.title || "Mock Test"),
+                escapeCsv(a.status),
+                escapeCsv(a.score ?? 0),
+                escapeCsv(a.totalMarks ?? 0),
+                escapeCsv(a.accuracy ?? 0),
+                escapeCsv(a.result || "N/A"),
+                escapeCsv(a.timeSpentSeconds || 0),
+                escapeCsv(a.startTime ? new Date(a.startTime).toISOString() : ""),
+                escapeCsv(a.endTime ? new Date(a.endTime).toISOString() : ""),
+            ]);
 
-        const csvContent = [headers.map(escapeCsv).join(","), ...rows.map((r) => r.join(","))].join("\r\n");
+            const csvContent = [headers.map(escapeCsv).join(","), ...rows.map((r) => r.join(","))].join("\r\n");
 
-        res.setHeader("Content-Type", "text/csv; charset=utf-8");
-        res.setHeader(
-            "Content-Disposition",
-            `attachment; filename="readyup_coordinator_report_${Date.now()}.csv"`
-        );
+            res.setHeader("Content-Type", "text/csv; charset=utf-8");
+            res.setHeader(
+                "Content-Disposition",
+                `attachment; filename="readyup_coordinator_report_${Date.now()}.csv"`
+            );
 
-        return res.send(csvContent);
-    } catch (error) {
-        console.error("exportResultsCsv error:", error.message);
-        return res.status(500).json({
-            success: false,
-            message: "Failed to generate CSV export",
-        });
-    }
-};
+            return res.send(csvContent);
+        } catch (error) {
+            console.error("exportResultsCsv error:", error.message);
+            return res.status(500).json({
+                success: false,
+                message: "Failed to generate CSV export",
+            });
+        }
+    };
 
-// ==========================================
-// UNIFIED MOCK TEST CREATION & MANAGEMENT
-// ==========================================
+    // ==========================================
+    // UNIFIED MOCK TEST CREATION & MANAGEMENT
+    // ==========================================
 
-export const getCoordinatorDepartments = async (req, res) => {
-    try {
-        const dbDepts = await User.distinct("department", { isActive: true });
-        const defaultDepts = [
-            "Computer Science & Engineering",
-            "Information Technology",
-            "Electronics & Communication Engineering",
-            "Electrical Engineering",
-            "Mechanical Engineering",
-            "Civil Engineering",
-            "Computer Engineering",
-            "Central Administration",
-            "Training & Placement Cell",
-        ];
+    export const getCoordinatorDepartments = async (req, res) => {
+        try {
+            return res.json({
+                success: true,
+                message: "Departments retrieved successfully",
+                data: ALLOWED_DEPARTMENTS,
+            });
+        } catch (error) {
+            console.error("getCoordinatorDepartments error:", error.message);
+            return res.status(500).json({
+                success: false,
+                message: "Failed to retrieve departments",
+            });
+        }
+    };
 
-        // Deduplicate and normalize
-        const deptSet = new Set();
-        defaultDepts.forEach((d) => deptSet.add(d.trim()));
-        (dbDepts || []).forEach((d) => {
-            if (d && typeof d === "string" && d.trim()) {
-                deptSet.add(d.trim());
+    export const createMockTest = async (req, res) => {
+        try {
+            const {
+                title,
+                description = "",
+                category = "Mixed Aptitude",
+                company = "General",
+                type = "company_mock",
+                durationMinutes = 60,
+                passingScore = 60,
+                assignedDepartments = [],
+                assignedBatches = [],
+                startDate = null,
+                endDate = null,
+                isScheduled = false,
+                status = "published",
+                questions = [],
+                questionIds = [],
+                manualQuestions = [],
+                csvQuestions = [],
+                saveQuestionsToBank = true,
+            } = req.body;
+
+            if (!title || typeof title !== "string" || !title.trim()) {
+                return res.status(400).json({
+                    success: false,
+                    message: "Test title is required.",
+                });
             }
-        });
 
-        const sortedDepts = Array.from(deptSet).sort((a, b) => a.localeCompare(b));
-        const finalDepts = [
-            "All Departments",
-            ...sortedDepts.filter((d) => d.toLowerCase() !== "all departments" && d.toLowerCase() !== "all"),
-        ];
+            const trimmedTitle = title.trim();
 
-        return res.json({
-            success: true,
-            message: "Departments retrieved successfully",
-            data: finalDepts,
-        });
-    } catch (error) {
-        console.error("getCoordinatorDepartments error:", error.message);
-        return res.status(500).json({
-            success: false,
-            message: "Failed to retrieve departments",
-        });
-    }
-};
+            const effectiveStartDate = startDate || req.body.startTime || null;
+            const effectiveEndDate = endDate || req.body.deadline || null;
 
-export const createMockTest = async (req, res) => {
-    try {
-        const {
-            title,
-            description = "",
-            category = "Mixed Aptitude",
-            company = "General",
-            type = "company_mock",
-            durationMinutes = 60,
-            passingScore = 60,
-            assignedDepartments = [],
-            assignedBatches = [],
-            startDate = null,
-            endDate = null,
-            isScheduled = false,
-            status = "published",
-            questions = [],
-            questionIds = [],
-            manualQuestions = [],
-            csvQuestions = [],
-            saveQuestionsToBank = true,
-        } = req.body;
-
-        if (!title || typeof title !== "string" || !title.trim()) {
-            return res.status(400).json({
-                success: false,
-                message: "Test title is required.",
-            });
-        }
-
-        const trimmedTitle = title.trim();
-
-        const effectiveStartDate = startDate || req.body.startTime || null;
-        const effectiveEndDate = endDate || req.body.deadline || null;
-
-        // Validate schedule dates
-        if (effectiveStartDate && effectiveEndDate && new Date(effectiveStartDate) > new Date(effectiveEndDate)) {
-            return res.status(400).json({
-                success: false,
-                message: "Start date must be before or equal to deadline (end date).",
-            });
-        }
-
-        // Consolidate all question inputs (consolidated wizard array or separated arrays)
-        const rawQuestionsList = [];
-        if (Array.isArray(questions) && questions.length > 0) {
-            rawQuestionsList.push(...questions);
-        }
-        if (Array.isArray(questionIds) && questionIds.length > 0) {
-            rawQuestionsList.push(...questionIds);
-        }
-        if (Array.isArray(manualQuestions) && manualQuestions.length > 0) {
-            rawQuestionsList.push(...manualQuestions);
-        }
-        if (Array.isArray(csvQuestions) && csvQuestions.length > 0) {
-            rawQuestionsList.push(...csvQuestions);
-        }
-
-        const isDraft = status === "draft";
-        if (rawQuestionsList.length === 0 && !isDraft) {
-            return res.status(400).json({
-                success: false,
-                message: "A mock test must contain at least 1 valid question.",
-            });
-        }
-
-        // Process questions: can be an array of Question ObjectIds (string or ObjectId)
-        // or question objects { questionText, options, correctOption, explanation, ... }
-        const resolvedQuestionIds = [];
-        const seenQuestionIds = new Set();
-        let totalCalculatedMarks = 0;
-
-        for (let i = 0; i < rawQuestionsList.length; i++) {
-            const item = rawQuestionsList[i];
-
-            // Case 1: ID reference to existing Question
-            if (typeof item === "string" || (item && item._id && !item.questionText)) {
-                const qId = typeof item === "string" ? item : item._id;
-                if (!mongoose.Types.ObjectId.isValid(qId)) {
-                    return res.status(400).json({
-                        success: false,
-                        message: `Invalid question ID at position ${i + 1}: ${qId}`,
-                    });
-                }
-                const existingQ = await Question.findById(qId);
-                if (!existingQ) {
-                    return res.status(404).json({
-                        success: false,
-                        message: `Question not found in repository: ${qId}`,
-                    });
-                }
-
-                const strId = String(existingQ._id);
-                if (seenQuestionIds.has(strId)) {
-                    return res.status(400).json({
-                        success: false,
-                        message: `Duplicate question detected in test blueprint: "${existingQ.questionText.slice(0, 40)}..."`,
-                    });
-                }
-                seenQuestionIds.add(strId);
-                resolvedQuestionIds.push(existingQ._id);
-                totalCalculatedMarks += (item.marks ? Number(item.marks) : 1);
-            } else if (typeof item === "object" && item !== null) {
-                // Case 2: New question object (from Manual Entry or CSV Upload)
-                const qText = (item.questionText || item.question || "").trim();
-                if (!qText) {
-                    return res.status(400).json({
-                        success: false,
-                        message: `Question text is required for question #${i + 1}`,
-                    });
-                }
-
-                const rawOptions = item.options || [];
-                let formattedOptions = [];
-                if (Array.isArray(rawOptions) && rawOptions.length >= 2) {
-                    formattedOptions = rawOptions.map((opt, oIdx) => {
-                        const optLetter = String.fromCharCode(65 + oIdx);
-                        const optText = typeof opt === "object" ? (opt.text || opt.optionText || "") : String(opt);
-                        const optId = typeof opt === "object" && opt.optionId ? opt.optionId.toUpperCase() : optLetter;
-                        return { optionId: optId, text: String(optText).trim() };
-                    });
-                } else if (item.optionA && item.optionB) {
-                    formattedOptions = [
-                        { optionId: "A", text: String(item.optionA).trim() },
-                        { optionId: "B", text: String(item.optionB).trim() },
-                    ];
-                    if (item.optionC) formattedOptions.push({ optionId: "C", text: String(item.optionC).trim() });
-                    if (item.optionD) formattedOptions.push({ optionId: "D", text: String(item.optionD).trim() });
-                }
-
-                if (formattedOptions.length < 2) {
-                    return res.status(400).json({
-                        success: false,
-                        message: `Question #${i + 1} must have at least 2 options.`,
-                    });
-                }
-
-                const correct = (item.correctOption || item.answer || "A").trim().toUpperCase();
-                const validOptionIds = formattedOptions.map((o) => o.optionId);
-                if (!validOptionIds.includes(correct)) {
-                    return res.status(400).json({
-                        success: false,
-                        message: `Question #${i + 1} has invalid correctOption '${correct}'. Options are: ${validOptionIds.join(", ")}`,
-                    });
-                }
-
-                // Check if existing question by questionId or duplicate
-                let questionDoc = null;
-                const candidateQuestionId = (item.questionId || `Q-${Date.now().toString(36)}-${i + 1}`).trim().toUpperCase();
-
-                // If this question already has an existing ID or exists in DB
-                if (item._id && mongoose.Types.ObjectId.isValid(item._id)) {
-                    questionDoc = await Question.findById(item._id);
-                } else if (candidateQuestionId) {
-                    questionDoc = await Question.findOne({ questionId: candidateQuestionId });
-                }
-
-                if (!questionDoc) {
-                    // Create new Question record in MongoDB
-                    questionDoc = await Question.create({
-                        questionId: candidateQuestionId,
-                        questionText: qText,
-                        options: formattedOptions,
-                        correctOption: correct,
-                        explanation: (item.explanation || "").trim(),
-                        category: item.category || category || "Quantitative Aptitude",
-                        topic: item.topic || "General",
-                        subtopic: item.subtopic || "",
-                        difficulty: ["easy", "medium", "hard"].includes((item.difficulty || "").toLowerCase())
-                            ? item.difficulty.toLowerCase()
-                            : "medium",
-                        companies: item.companies
-                            ? (Array.isArray(item.companies) ? item.companies : String(item.companies).split(",").map((c) => c.trim()).filter(Boolean))
-                            : (company && company !== "General" ? [company] : []),
-                        source: item.source || (item.questionSource === "csv" ? "CSV Upload" : "Coordinator Manual Entry"),
-                        year: item.year ? Number(item.year) : new Date().getFullYear(),
-                        isVerified: true,
-                        isActive: saveQuestionsToBank !== false,
-                    });
-                }
-
-                const strId = String(questionDoc._id);
-                if (seenQuestionIds.has(strId)) {
-                    return res.status(400).json({
-                        success: false,
-                        message: `Duplicate question detected in test blueprint: "${qText.slice(0, 40)}..."`,
-                    });
-                }
-                seenQuestionIds.add(strId);
-                resolvedQuestionIds.push(questionDoc._id);
-                totalCalculatedMarks += (item.marks ? Number(item.marks) : 1);
+            // Validate schedule dates
+            if (effectiveStartDate && effectiveEndDate && new Date(effectiveStartDate) > new Date(effectiveEndDate)) {
+                return res.status(400).json({
+                    success: false,
+                    message: "Start date must be before or equal to deadline (end date).",
+                });
             }
-        }
 
-        // Generate clean unique slug
-        const baseSlug = trimmedTitle.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "");
-        let slug = baseSlug;
-        const slugExists = await MockTest.findOne({ slug });
-        if (slugExists) {
-            slug = `${baseSlug}-${Date.now().toString(36)}`;
-        }
+            // Consolidate all question inputs (consolidated wizard array or separated arrays)
+            const rawQuestionsList = [];
+            if (Array.isArray(questions) && questions.length > 0) {
+                rawQuestionsList.push(...questions);
+            }
+            if (Array.isArray(questionIds) && questionIds.length > 0) {
+                rawQuestionsList.push(...questionIds);
+            }
+            if (Array.isArray(manualQuestions) && manualQuestions.length > 0) {
+                rawQuestionsList.push(...manualQuestions);
+            }
+            if (Array.isArray(csvQuestions) && csvQuestions.length > 0) {
+                rawQuestionsList.push(...csvQuestions);
+            }
 
-        // Normalize departments
-        const mergedDepts = Array.from(new Set([
-            ...(Array.isArray(assignedDepartments) ? assignedDepartments : []),
-            ...(Array.isArray(assignedBatches) ? assignedBatches : []),
-        ].map((d) => String(d).trim()).filter(Boolean)));
+            const isDraft = status === "draft";
+            if (rawQuestionsList.length === 0 && !isDraft) {
+                return res.status(400).json({
+                    success: false,
+                    message: "A mock test must contain at least 1 valid question.",
+                });
+            }
 
-        const newTest = await MockTest.create({
-            title: trimmedTitle,
-            slug,
-            description: (description || "").trim(),
-            category: category || "Mixed Aptitude",
-            company: (company || "General").trim(),
-            type: ["company", "company_mock", "grand", "topic", "topic_test", "diagnostic"].includes(type)
-                ? type
-                : (company && company !== "General" ? "company_mock" : "topic_test"),
-            durationMinutes: Number(durationMinutes) || 30,
-            totalQuestions: resolvedQuestionIds.length,
-            totalMarks: req.body.totalMarks ? Number(req.body.totalMarks) : (totalCalculatedMarks || resolvedQuestionIds.length),
-            passingScore: Number(passingScore) || 60,
-            questions: resolvedQuestionIds,
-            assignedDepartments: mergedDepts,
-            assignedBatches: mergedDepts,
-            startDate: effectiveStartDate ? new Date(effectiveStartDate) : null,
-            endDate: effectiveEndDate ? new Date(effectiveEndDate) : null,
-            startTime: effectiveStartDate ? new Date(effectiveStartDate) : null,
-            deadline: effectiveEndDate ? new Date(effectiveEndDate) : null,
-            isScheduled: Boolean(isScheduled),
-            status: ["draft", "preview", "published", "archived"].includes(status) ? status : "published",
-            isActive: status !== "archived",
-            createdBy: req.user._id,
-        });
-
-        await logAuditEvent({
-            action: "MOCK_TEST_CREATE",
-            user: req.user,
-            targetType: "TEST",
-            targetId: newTest._id,
-            details: `Coordinator created mock test '${newTest.title}' with ${resolvedQuestionIds.length} questions (Status: ${newTest.status}, Departments: ${mergedDepts.join(", ") || "All"})`,
-            ipAddress: req.ip,
-        });
-
-        if (newTest.status === "published") {
-            await notifyEligibleStudentsOnTestPublish(newTest);
-        }
-
-        return res.status(201).json({
-            success: true,
-            message: `Mock test '${newTest.title}' created successfully!`,
-            data: newTest,
-        });
-    } catch (error) {
-        console.error("createMockTest error:", error.message);
-        return res.status(500).json({
-            success: false,
-            message: `Failed to create mock test: ${error.message}`,
-        });
-    }
-};
-
-export const updateMockTest = async (req, res) => {
-    try {
-        const { id } = req.params;
-        if (!id || !mongoose.Types.ObjectId.isValid(id)) {
-            return res.status(404).json({
-                success: false,
-                message: "Mock test not found",
-            });
-        }
-        const test = await MockTest.findById(id);
-        if (!test) {
-            return res.status(404).json({
-                success: false,
-                message: "Mock test not found",
-            });
-        }
-
-        const {
-            title,
-            description,
-            category,
-            company,
-            durationMinutes,
-            passingScore,
-            assignedDepartments,
-            assignedBatches,
-            startDate,
-            endDate,
-            isScheduled,
-            status,
-            questions,
-        } = req.body;
-
-        if (title !== undefined) test.title = String(title).trim();
-        if (description !== undefined) test.description = String(description).trim();
-        if (category !== undefined) test.category = category;
-        if (company !== undefined) test.company = company;
-        if (durationMinutes !== undefined) test.durationMinutes = Number(durationMinutes);
-        if (passingScore !== undefined) test.passingScore = Number(passingScore);
-        if (req.body.totalMarks !== undefined) test.totalMarks = Number(req.body.totalMarks);
-        if (req.body.instructions !== undefined) {
-            test.instructions = Array.isArray(req.body.instructions) ? req.body.instructions : [req.body.instructions];
-        }
-
-        if (assignedDepartments !== undefined || assignedBatches !== undefined) {
-            const mergedDepts = Array.from(new Set([
-                ...(Array.isArray(assignedDepartments) ? assignedDepartments : (test.assignedDepartments || [])),
-                ...(Array.isArray(assignedBatches) ? assignedBatches : (test.assignedBatches || [])),
-            ].map((d) => String(d).trim()).filter(Boolean)));
-            test.assignedDepartments = mergedDepts;
-            test.assignedBatches = mergedDepts;
-        }
-
-        const reqStart = startDate !== undefined ? startDate : req.body.startTime;
-        const reqEnd = endDate !== undefined ? endDate : req.body.deadline;
-        if (reqStart !== undefined) {
-            test.startDate = reqStart ? new Date(reqStart) : null;
-            test.startTime = test.startDate;
-        }
-        if (reqEnd !== undefined) {
-            test.endDate = reqEnd ? new Date(reqEnd) : null;
-            test.deadline = test.endDate;
-        }
-        if (isScheduled !== undefined) test.isScheduled = Boolean(isScheduled);
-        const wasPublished = test.status === "published";
-        if (status !== undefined) {
-            test.status = status;
-            test.isActive = status !== "archived";
-        }
-
-        const effectiveStart = test.startDate || test.startTime;
-        const effectiveEnd = test.endDate || test.deadline;
-        if (effectiveStart && effectiveEnd && new Date(effectiveStart) > new Date(effectiveEnd)) {
-            return res.status(400).json({
-                success: false,
-                message: "Start date must be before or equal to deadline (end date).",
-            });
-        }
-
-        // Process updated questions (supports ObjectId strings, questionBankIds, manual, and CSV question objects)
-        const rawQuestionsList = [
-            ...(Array.isArray(questions) ? questions : []),
-            ...(Array.isArray(req.body.csvQuestions) ? req.body.csvQuestions : []),
-            ...(Array.isArray(req.body.manualQuestions) ? req.body.manualQuestions : []),
-            ...(Array.isArray(req.body.questionBankIds) ? req.body.questionBankIds : []),
-        ];
-
-        if (rawQuestionsList.length > 0) {
+            // Process questions: can be an array of Question ObjectIds (string or ObjectId)
+            // or question objects { questionText, options, correctOption, explanation, ... }
             const resolvedQuestionIds = [];
             const seenQuestionIds = new Set();
             let totalCalculatedMarks = 0;
 
             for (let i = 0; i < rawQuestionsList.length; i++) {
                 const item = rawQuestionsList[i];
-                if (!item) continue;
 
-                // Case 1: ID reference or ObjectId string
+                // Case 1: ID reference to existing Question
                 if (typeof item === "string" || (item && item._id && !item.questionText)) {
                     const qId = typeof item === "string" ? item : item._id;
-                    if (mongoose.Types.ObjectId.isValid(qId)) {
-                        const strId = String(qId);
-                        if (!seenQuestionIds.has(strId)) {
-                            seenQuestionIds.add(strId);
-                            resolvedQuestionIds.push(new mongoose.Types.ObjectId(strId));
-                            totalCalculatedMarks += (item.marks ? Number(item.marks) : 1);
-                        }
+                    if (!mongoose.Types.ObjectId.isValid(qId)) {
+                        return res.status(400).json({
+                            success: false,
+                            message: `Invalid question ID at position ${i + 1}: ${qId}`,
+                        });
                     }
-                } else if (typeof item === "object") {
-                    // Case 2: Full question object (from manual entry, CSV, or loaded existing test)
-                    const qText = (item.questionText || item.question || "").trim();
-                    if (!qText) continue;
+                    const existingQ = await Question.findById(qId);
+                    if (!existingQ) {
+                        return res.status(404).json({
+                            success: false,
+                            message: `Question not found in repository: ${qId}`,
+                        });
+                    }
 
+                    const strId = String(existingQ._id);
+                    if (seenQuestionIds.has(strId)) {
+                        return res.status(400).json({
+                            success: false,
+                            message: `Duplicate question detected in test blueprint: "${existingQ.questionText.slice(0, 40)}..."`,
+                        });
+                    }
+                    seenQuestionIds.add(strId);
+                    resolvedQuestionIds.push(existingQ._id);
+                    totalCalculatedMarks += (item.marks ? Number(item.marks) : 1);
+                } else if (typeof item === "object" && item !== null) {
+                    // Case 2: New question object (from Manual Entry or CSV Upload)
+                    const qText = (item.questionText || item.question || "").trim();
+                    if (!qText) {
+                        return res.status(400).json({
+                            success: false,
+                            message: `Question text is required for question #${i + 1}`,
+                        });
+                    }
+
+                    const rawOptions = item.options || [];
+                    let formattedOptions = [];
+                    if (Array.isArray(rawOptions) && rawOptions.length >= 2) {
+                        formattedOptions = rawOptions.map((opt, oIdx) => {
+                            const optLetter = String.fromCharCode(65 + oIdx);
+                            const optText = typeof opt === "object" ? (opt.text || opt.optionText || "") : String(opt);
+                            const optId = typeof opt === "object" && opt.optionId ? opt.optionId.toUpperCase() : optLetter;
+                            return { optionId: optId, text: String(optText).trim() };
+                        });
+                    } else if (item.optionA && item.optionB) {
+                        formattedOptions = [
+                            { optionId: "A", text: String(item.optionA).trim() },
+                            { optionId: "B", text: String(item.optionB).trim() },
+                        ];
+                        if (item.optionC) formattedOptions.push({ optionId: "C", text: String(item.optionC).trim() });
+                        if (item.optionD) formattedOptions.push({ optionId: "D", text: String(item.optionD).trim() });
+                    }
+
+                    if (formattedOptions.length < 2) {
+                        return res.status(400).json({
+                            success: false,
+                            message: `Question #${i + 1} must have at least 2 options.`,
+                        });
+                    }
+
+                    const correct = (item.correctOption || item.answer || "A").trim().toUpperCase();
+                    const validOptionIds = formattedOptions.map((o) => o.optionId);
+                    if (!validOptionIds.includes(correct)) {
+                        return res.status(400).json({
+                            success: false,
+                            message: `Question #${i + 1} has invalid correctOption '${correct}'. Options are: ${validOptionIds.join(", ")}`,
+                        });
+                    }
+
+                    // Check if existing question by questionId or duplicate
                     let questionDoc = null;
+                    const candidateQuestionId = (item.questionId || `Q-${Date.now().toString(36)}-${i + 1}`).trim().toUpperCase();
+
+                    // If this question already has an existing ID or exists in DB
                     if (item._id && mongoose.Types.ObjectId.isValid(item._id)) {
                         questionDoc = await Question.findById(item._id);
-                    }
-                    if (!questionDoc && item.questionId) {
-                        questionDoc = await Question.findOne({ questionId: String(item.questionId).trim().toUpperCase() });
+                    } else if (candidateQuestionId) {
+                        questionDoc = await Question.findOne({ questionId: candidateQuestionId });
                     }
 
                     if (!questionDoc) {
-                        const rawOptions = item.options || [];
-                        let formattedOptions = [];
-                        if (Array.isArray(rawOptions) && rawOptions.length >= 2) {
-                            formattedOptions = rawOptions.map((opt, oIdx) => {
-                                const optLetter = String.fromCharCode(65 + oIdx);
-                                const optText = typeof opt === "object" ? (opt.text || opt.optionText || "") : String(opt);
-                                const optId = typeof opt === "object" && opt.optionId ? opt.optionId.toUpperCase() : optLetter;
-                                return { optionId: optId, text: String(optText).trim() };
-                            });
-                        } else if (item.optionA && item.optionB) {
-                            formattedOptions = [
-                                { optionId: "A", text: String(item.optionA).trim() },
-                                { optionId: "B", text: String(item.optionB).trim() },
-                            ];
-                            if (item.optionC) formattedOptions.push({ optionId: "C", text: String(item.optionC).trim() });
-                            if (item.optionD) formattedOptions.push({ optionId: "D", text: String(item.optionD).trim() });
-                        }
-
-                        const correct = (item.correctOption || item.answer || "A").trim().toUpperCase();
+                        // Create new Question record in MongoDB
                         questionDoc = await Question.create({
-                            questionId: (item.questionId || `Q-${Date.now().toString(36)}-${i + 1}`).trim().toUpperCase(),
+                            questionId: candidateQuestionId,
                             questionText: qText,
                             options: formattedOptions,
                             correctOption: correct,
                             explanation: (item.explanation || "").trim(),
-                            category: item.category || test.category || "Quantitative Aptitude",
+                            category: item.category || category || "Quantitative Aptitude",
                             topic: item.topic || "General",
                             subtopic: item.subtopic || "",
-                            difficulty: ["easy", "medium", "hard"].includes((item.difficulty || "").toLowerCase()) ? item.difficulty.toLowerCase() : "medium",
-                            companies: test.company && test.company !== "General" ? [test.company] : [],
-                            source: item.source || "Coordinator Manual Entry",
-                            year: new Date().getFullYear(),
+                            difficulty: ["easy", "medium", "hard"].includes((item.difficulty || "").toLowerCase())
+                                ? item.difficulty.toLowerCase()
+                                : "medium",
+                            companies: item.companies
+                                ? (Array.isArray(item.companies) ? item.companies : String(item.companies).split(",").map((c) => c.trim()).filter(Boolean))
+                                : (company && company !== "General" ? [company] : []),
+                            source: item.source || (item.questionSource === "csv" ? "CSV Upload" : "Coordinator Manual Entry"),
+                            year: item.year ? Number(item.year) : new Date().getFullYear(),
                             isVerified: true,
-                            isActive: true,
+                            isActive: saveQuestionsToBank !== false,
                         });
                     }
 
                     const strId = String(questionDoc._id);
-                    if (!seenQuestionIds.has(strId)) {
-                        seenQuestionIds.add(strId);
-                        resolvedQuestionIds.push(questionDoc._id);
-                        totalCalculatedMarks += (item.marks ? Number(item.marks) : 1);
+                    if (seenQuestionIds.has(strId)) {
+                        return res.status(400).json({
+                            success: false,
+                            message: `Duplicate question detected in test blueprint: "${qText.slice(0, 40)}..."`,
+                        });
                     }
+                    seenQuestionIds.add(strId);
+                    resolvedQuestionIds.push(questionDoc._id);
+                    totalCalculatedMarks += (item.marks ? Number(item.marks) : 1);
                 }
             }
 
-            if (resolvedQuestionIds.length > 0) {
-                test.questions = resolvedQuestionIds;
-                test.totalQuestions = resolvedQuestionIds.length;
-                test.totalMarks = req.body.totalMarks ? Number(req.body.totalMarks) : (totalCalculatedMarks || resolvedQuestionIds.length);
+            // Generate clean unique slug
+            const baseSlug = trimmedTitle.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "");
+            let slug = baseSlug;
+            const slugExists = await MockTest.findOne({ slug });
+            if (slugExists) {
+                slug = `${baseSlug}-${Date.now().toString(36)}`;
             }
-        }
 
-        // Validate question count if publishing
-        if (test.status === "published") {
-            const qCount = (test.questions && test.questions.length) || 0;
-            if (qCount === 0) {
-                return res.status(400).json({
+            // 1. Department normalization (exclusively for department values)
+            let normalizedDepts = [];
+            if (Array.isArray(assignedDepartments) && assignedDepartments.length > 0) {
+                normalizedDepts = assignedDepartments
+                    .map((d) => normalizeDepartment(String(d)))
+                    .filter(Boolean);
+            } else if (Array.isArray(assignedBatches) && assignedBatches.length > 0) {
+                normalizedDepts = assignedBatches
+                    .filter((b) => isNaN(parseInt(b, 10)))
+                    .map((d) => normalizeDepartment(String(d)))
+                    .filter(Boolean);
+            }
+
+            const finalDepts = normalizedDepts.includes('ALL') || normalizedDepts.length === 0
+                ? ['ALL']
+                : Array.from(new Set(normalizedDepts));
+
+            // 2. Batch preservation (exclusively for batch / graduation year values)
+            let finalBatches = [];
+            if (Array.isArray(assignedBatches) && assignedBatches.length > 0) {
+                finalBatches = assignedBatches
+                    .map((b) => String(b).trim())
+                    .filter(Boolean);
+                const isAllBatches = finalBatches.some((b) => b.toLowerCase() === 'all' || b.toLowerCase() === 'all batches');
+                finalBatches = isAllBatches ? ['ALL'] : Array.from(new Set(finalBatches));
+            } else if (finalDepts.includes('ALL')) {
+                finalBatches = ['ALL'];
+            }
+
+            const newTest = await MockTest.create({
+                title: trimmedTitle,
+                slug,
+                description: (description || "").trim(),
+                category: category || "Mixed Aptitude",
+                company: (company || "General").trim(),
+                type: ["company", "company_mock", "grand", "topic", "topic_test", "diagnostic"].includes(type)
+                    ? type
+                    : (company && company !== "General" ? "company_mock" : "topic_test"),
+                durationMinutes: Number(durationMinutes) || 30,
+                totalQuestions: resolvedQuestionIds.length,
+                totalMarks: req.body.totalMarks ? Number(req.body.totalMarks) : (totalCalculatedMarks || resolvedQuestionIds.length),
+                passingScore: Number(passingScore) || 60,
+                questions: resolvedQuestionIds,
+                assignedDepartments: finalDepts,
+                assignedBatches: finalBatches,
+                startDate: effectiveStartDate ? new Date(effectiveStartDate) : null,
+                endDate: effectiveEndDate ? new Date(effectiveEndDate) : null,
+                startTime: effectiveStartDate ? new Date(effectiveStartDate) : null,
+                deadline: effectiveEndDate ? new Date(effectiveEndDate) : null,
+                isScheduled: Boolean(isScheduled),
+                status: ["draft", "preview", "published", "archived"].includes(status) ? status : "published",
+                isActive: status !== "archived",
+                createdBy: req.user._id,
+            });
+
+            await logAuditEvent({
+                action: "MOCK_TEST_CREATE",
+                user: req.user,
+                targetType: "TEST",
+                targetId: newTest._id,
+                details: `Coordinator created mock test '${newTest.title}' with ${resolvedQuestionIds.length} questions (Status: ${newTest.status}, Departments: ${finalDepts.join(", ") || "All"}${finalBatches && finalBatches.length > 0 ? `, Batches: ${finalBatches.join(", ")}` : ""})`,
+                ipAddress: req.ip,
+            });
+
+            if (newTest.status === "published") {
+                await notifyEligibleStudentsOnTestPublish(newTest);
+            }
+
+            return res.status(201).json({
+                success: true,
+                message: `Mock test '${newTest.title}' created successfully!`,
+                data: newTest,
+            });
+        } catch (error) {
+            console.error("createMockTest error:", error.message);
+            return res.status(500).json({
+                success: false,
+                message: `Failed to create mock test: ${error.message}`,
+            });
+        }
+    };
+
+    export const updateMockTest = async (req, res) => {
+        try {
+            const { id } = req.params;
+            if (!id || !mongoose.Types.ObjectId.isValid(id)) {
+                return res.status(404).json({
                     success: false,
-                    message: "Cannot publish: Assessment must contain at least 1 question.",
+                    message: "Mock test not found",
                 });
             }
-        }
+            const test = await MockTest.findById(id);
+            if (!test) {
+                return res.status(404).json({
+                    success: false,
+                    message: "Mock test not found",
+                });
+            }
 
-        await test.save();
+            const {
+                title,
+                description,
+                category,
+                company,
+                durationMinutes,
+                passingScore,
+                assignedDepartments,
+                assignedBatches,
+                startDate,
+                endDate,
+                isScheduled,
+                status,
+                questions,
+            } = req.body;
 
-        if (test.status === "published" && !wasPublished) {
-            await notifyEligibleStudentsOnTestPublish(test);
-        }
+            if (title !== undefined) test.title = String(title).trim();
+            if (description !== undefined) test.description = String(description).trim();
+            if (category !== undefined) test.category = category;
+            if (company !== undefined) test.company = company;
+            if (durationMinutes !== undefined) test.durationMinutes = Number(durationMinutes);
+            if (passingScore !== undefined) test.passingScore = Number(passingScore);
+            if (req.body.totalMarks !== undefined) test.totalMarks = Number(req.body.totalMarks);
+            if (req.body.instructions !== undefined) {
+                test.instructions = Array.isArray(req.body.instructions) ? req.body.instructions : [req.body.instructions];
+            }
 
-        await logAuditEvent({
-            action: "MOCK_TEST_UPDATE",
-            user: req.user,
-            targetType: "TEST",
-            targetId: test._id,
-            details: `Coordinator updated mock test '${test.title}' (Status: ${test.status})`,
-            ipAddress: req.ip,
-        });
+            if (assignedDepartments !== undefined) {
+                const rawDepts = Array.isArray(assignedDepartments) ? assignedDepartments : [assignedDepartments];
+                const normalizedDepts = rawDepts
+                    .map((d) => normalizeDepartment(String(d)))
+                    .filter(Boolean);
+                test.assignedDepartments = normalizedDepts.includes('ALL') || normalizedDepts.length === 0
+                    ? ['ALL']
+                    : Array.from(new Set(normalizedDepts));
+            }
 
-        return res.json({
-            success: true,
-            message: "Mock test updated successfully",
-            data: test,
-        });
-    } catch (error) {
-        console.error("updateMockTest error:", error.message);
-        return res.status(500).json({
-            success: false,
-            message: `Failed to update mock test: ${error.message}`,
-        });
-    }
-};
+            if (assignedBatches !== undefined) {
+                const rawBatches = Array.isArray(assignedBatches) ? assignedBatches : [assignedBatches];
+                const cleanBatches = rawBatches
+                    .map((b) => String(b).trim())
+                    .filter(Boolean);
+                const isAllBatches = cleanBatches.some((b) => b.toLowerCase() === 'all' || b.toLowerCase() === 'all batches');
+                test.assignedBatches = isAllBatches ? ['ALL'] : Array.from(new Set(cleanBatches));
+            }
 
-export const archiveMockTest = async (req, res) => {
-    try {
-        const { id } = req.params;
-        if (!id || !mongoose.Types.ObjectId.isValid(id)) {
-            return res.status(404).json({
+            const reqStart = startDate !== undefined ? startDate : req.body.startTime;
+            const reqEnd = endDate !== undefined ? endDate : req.body.deadline;
+            if (reqStart !== undefined) {
+                test.startDate = reqStart ? new Date(reqStart) : null;
+                test.startTime = test.startDate;
+            }
+            if (reqEnd !== undefined) {
+                test.endDate = reqEnd ? new Date(reqEnd) : null;
+                test.deadline = test.endDate;
+            }
+            if (isScheduled !== undefined) test.isScheduled = Boolean(isScheduled);
+            const wasPublished = test.status === "published";
+            if (status !== undefined) {
+                test.status = status;
+                test.isActive = status !== "archived";
+            }
+
+            const effectiveStart = test.startDate || test.startTime;
+            const effectiveEnd = test.endDate || test.deadline;
+            if (effectiveStart && effectiveEnd && new Date(effectiveStart) > new Date(effectiveEnd)) {
+                return res.status(400).json({
+                    success: false,
+                    message: "Start date must be before or equal to deadline (end date).",
+                });
+            }
+
+            // Process updated questions (supports ObjectId strings, questionBankIds, manual, and CSV question objects)
+            const rawQuestionsList = [
+                ...(Array.isArray(questions) ? questions : []),
+                ...(Array.isArray(req.body.csvQuestions) ? req.body.csvQuestions : []),
+                ...(Array.isArray(req.body.manualQuestions) ? req.body.manualQuestions : []),
+                ...(Array.isArray(req.body.questionBankIds) ? req.body.questionBankIds : []),
+            ];
+
+            if (rawQuestionsList.length > 0) {
+                const resolvedQuestionIds = [];
+                const seenQuestionIds = new Set();
+                let totalCalculatedMarks = 0;
+
+                for (let i = 0; i < rawQuestionsList.length; i++) {
+                    const item = rawQuestionsList[i];
+                    if (!item) continue;
+
+                    // Case 1: ID reference or ObjectId string
+                    if (typeof item === "string" || (item && item._id && !item.questionText)) {
+                        const qId = typeof item === "string" ? item : item._id;
+                        if (mongoose.Types.ObjectId.isValid(qId)) {
+                            const strId = String(qId);
+                            if (!seenQuestionIds.has(strId)) {
+                                seenQuestionIds.add(strId);
+                                resolvedQuestionIds.push(new mongoose.Types.ObjectId(strId));
+                                totalCalculatedMarks += (item.marks ? Number(item.marks) : 1);
+                            }
+                        }
+                    } else if (typeof item === "object") {
+                        // Case 2: Full question object (from manual entry, CSV, or loaded existing test)
+                        const qText = (item.questionText || item.question || "").trim();
+                        if (!qText) continue;
+
+                        let questionDoc = null;
+                        if (item._id && mongoose.Types.ObjectId.isValid(item._id)) {
+                            questionDoc = await Question.findById(item._id);
+                        }
+                        if (!questionDoc && item.questionId) {
+                            questionDoc = await Question.findOne({ questionId: String(item.questionId).trim().toUpperCase() });
+                        }
+
+                        if (!questionDoc) {
+                            const rawOptions = item.options || [];
+                            let formattedOptions = [];
+                            if (Array.isArray(rawOptions) && rawOptions.length >= 2) {
+                                formattedOptions = rawOptions.map((opt, oIdx) => {
+                                    const optLetter = String.fromCharCode(65 + oIdx);
+                                    const optText = typeof opt === "object" ? (opt.text || opt.optionText || "") : String(opt);
+                                    const optId = typeof opt === "object" && opt.optionId ? opt.optionId.toUpperCase() : optLetter;
+                                    return { optionId: optId, text: String(optText).trim() };
+                                });
+                            } else if (item.optionA && item.optionB) {
+                                formattedOptions = [
+                                    { optionId: "A", text: String(item.optionA).trim() },
+                                    { optionId: "B", text: String(item.optionB).trim() },
+                                ];
+                                if (item.optionC) formattedOptions.push({ optionId: "C", text: String(item.optionC).trim() });
+                                if (item.optionD) formattedOptions.push({ optionId: "D", text: String(item.optionD).trim() });
+                            }
+
+                            const correct = (item.correctOption || item.answer || "A").trim().toUpperCase();
+                            questionDoc = await Question.create({
+                                questionId: (item.questionId || `Q-${Date.now().toString(36)}-${i + 1}`).trim().toUpperCase(),
+                                questionText: qText,
+                                options: formattedOptions,
+                                correctOption: correct,
+                                explanation: (item.explanation || "").trim(),
+                                category: item.category || test.category || "Quantitative Aptitude",
+                                topic: item.topic || "General",
+                                subtopic: item.subtopic || "",
+                                difficulty: ["easy", "medium", "hard"].includes((item.difficulty || "").toLowerCase()) ? item.difficulty.toLowerCase() : "medium",
+                                companies: test.company && test.company !== "General" ? [test.company] : [],
+                                source: item.source || "Coordinator Manual Entry",
+                                year: new Date().getFullYear(),
+                                isVerified: true,
+                                isActive: true,
+                            });
+                        }
+
+                        const strId = String(questionDoc._id);
+                        if (!seenQuestionIds.has(strId)) {
+                            seenQuestionIds.add(strId);
+                            resolvedQuestionIds.push(questionDoc._id);
+                            totalCalculatedMarks += (item.marks ? Number(item.marks) : 1);
+                        }
+                    }
+                }
+
+                if (resolvedQuestionIds.length > 0) {
+                    test.questions = resolvedQuestionIds;
+                    test.totalQuestions = resolvedQuestionIds.length;
+                    test.totalMarks = req.body.totalMarks ? Number(req.body.totalMarks) : (totalCalculatedMarks || resolvedQuestionIds.length);
+                }
+            }
+
+            // Validate question count if publishing
+            if (test.status === "published") {
+                const qCount = (test.questions && test.questions.length) || 0;
+                if (qCount === 0) {
+                    return res.status(400).json({
+                        success: false,
+                        message: "Cannot publish: Assessment must contain at least 1 question.",
+                    });
+                }
+            }
+
+            await test.save();
+
+            if (test.status === "published" && !wasPublished) {
+                await notifyEligibleStudentsOnTestPublish(test);
+            }
+
+            await logAuditEvent({
+                action: "MOCK_TEST_UPDATE",
+                user: req.user,
+                targetType: "TEST",
+                targetId: test._id,
+                details: `Coordinator updated mock test '${test.title}' (Status: ${test.status})`,
+                ipAddress: req.ip,
+            });
+
+            return res.json({
+                success: true,
+                message: "Mock test updated successfully",
+                data: test,
+            });
+        } catch (error) {
+            console.error("updateMockTest error:", error.message);
+            return res.status(500).json({
                 success: false,
-                message: "Mock test not found",
+                message: `Failed to update mock test: ${error.message}`,
             });
         }
-        const test = await MockTest.findById(id);
-        if (!test) {
-            return res.status(404).json({
+    };
+
+    export const archiveMockTest = async (req, res) => {
+        try {
+            const { id } = req.params;
+            if (!id || !mongoose.Types.ObjectId.isValid(id)) {
+                return res.status(404).json({
+                    success: false,
+                    message: "Mock test not found",
+                });
+            }
+            const test = await MockTest.findById(id);
+            if (!test) {
+                return res.status(404).json({
+                    success: false,
+                    message: "Mock test not found",
+                });
+            }
+
+            // Count historical attempts
+            const attemptsCount = await Attempt.countDocuments({ mockTest: test._id });
+
+            // Safe soft-delete / archive
+            test.isActive = false;
+            test.status = "archived";
+            await test.save();
+
+            await logAuditEvent({
+                action: "MOCK_TEST_ARCHIVE",
+                user: req.user,
+                targetType: "TEST",
+                targetId: test._id,
+                details: `Coordinator safely archived mock test '${test.title}' with ${attemptsCount} historical attempts preserved.`,
+                ipAddress: req.ip,
+            });
+
+            return res.json({
+                success: true,
+                message: `Mock test '${test.title}' safely archived. ${attemptsCount} student attempt records preserved.`,
+                data: {
+                    testId: test._id,
+                    title: test.title,
+                    status: "archived",
+                    isActive: false,
+                    attemptsPreserved: attemptsCount,
+                },
+            });
+        } catch (error) {
+            console.error("archiveMockTest error:", error.message);
+            return res.status(500).json({
                 success: false,
-                message: "Mock test not found",
+                message: `Failed to archive mock test: ${error.message}`,
             });
         }
-
-        // Count historical attempts
-        const attemptsCount = await Attempt.countDocuments({ mockTest: test._id });
-
-        // Safe soft-delete / archive
-        test.isActive = false;
-        test.status = "archived";
-        await test.save();
-
-        await logAuditEvent({
-            action: "MOCK_TEST_ARCHIVE",
-            user: req.user,
-            targetType: "TEST",
-            targetId: test._id,
-            details: `Coordinator safely archived mock test '${test.title}' with ${attemptsCount} historical attempts preserved.`,
-            ipAddress: req.ip,
-        });
-
-        return res.json({
-            success: true,
-            message: `Mock test '${test.title}' safely archived. ${attemptsCount} student attempt records preserved.`,
-            data: {
-                testId: test._id,
-                title: test.title,
-                status: "archived",
-                isActive: false,
-                attemptsPreserved: attemptsCount,
-            },
-        });
-    } catch (error) {
-        console.error("archiveMockTest error:", error.message);
-        return res.status(500).json({
-            success: false,
-            message: `Failed to archive mock test: ${error.message}`,
-        });
-    }
-};
+    };
 

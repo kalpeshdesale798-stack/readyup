@@ -331,20 +331,31 @@ class ApiClient {
       return { success: true, message: 'Mock test published successfully', data: published };
     }
     if (endpoint.startsWith('/coordinator/mock-tests') && method === 'GET') {
-      if (endpoint === '/coordinator/mock-tests' || endpoint.includes('?')) {
-        const urlParams = new URLSearchParams(endpoint.split('?')[1] || '');
-        const res = mockStore.getCoordinatorMockTests(Object.fromEntries(urlParams.entries()));
-        return { success: true, message: 'Mock test monitoring data retrieved', data: res.data, pagination: res.pagination };
-      }
-      if (endpoint.endsWith('/attempts') || endpoint.includes('/attempts?')) {
+      let activeUser = null;
+      try {
+        const saved = localStorage.getItem('readyup_auth_user');
+        if (saved) activeUser = JSON.parse(saved);
+      } catch {}
+
+      // Handle attempts sub-route FIRST before generic query parsing
+      if (endpoint.includes('/attempts')) {
         const parts = endpoint.split('/');
         const testId = parts[3];
         const urlParams = new URLSearchParams(endpoint.split('?')[1] || '');
-        const res = mockStore.getCoordinatorMockTestAttempts(testId, Object.fromEntries(urlParams.entries()));
+        const res = mockStore.getCoordinatorMockTestAttempts(testId, Object.fromEntries(urlParams.entries()), activeUser);
         return { success: true, message: 'Mock test attempts retrieved', data: res.data, pagination: res.pagination };
       }
+
+      // Handle mock tests monitoring / list
+      if (endpoint === '/coordinator/mock-tests' || endpoint.startsWith('/coordinator/mock-tests?')) {
+        const urlParams = new URLSearchParams(endpoint.split('?')[1] || '');
+        const res = mockStore.getCoordinatorMockTests(Object.fromEntries(urlParams.entries()), activeUser);
+        return { success: true, message: 'Mock test monitoring data retrieved', data: res.data, pagination: res.pagination };
+      }
+
+      // Handle single mock test detail
       const testId = endpoint.split('/')[3];
-      return { success: true, message: 'Mock test details retrieved', data: mockStore.getCoordinatorMockTestDetail(testId) };
+      return { success: true, message: 'Mock test details retrieved', data: mockStore.getCoordinatorMockTestDetail(testId, activeUser) };
     }
     if (endpoint.includes('/mock-tests/') && endpoint.endsWith('/assign') && method === 'PATCH') {
       const testId = endpoint.split('/')[3];
@@ -352,16 +363,27 @@ class ApiClient {
       return { success: true, message: 'Mock test assigned and scheduled', data: updated };
     }
     if (endpoint.startsWith('/coordinator/students') && method === 'GET') {
-      if (endpoint === '/coordinator/students' || endpoint.includes('?')) {
+      let activeUser = null;
+      try {
+        const saved = localStorage.getItem('readyup_auth_user');
+        if (saved) activeUser = JSON.parse(saved);
+      } catch {}
+
+      if (endpoint === '/coordinator/students' || endpoint.startsWith('/coordinator/students?')) {
         const urlParams = new URLSearchParams(endpoint.split('?')[1] || '');
-        const res = mockStore.getCoordinatorStudents(Object.fromEntries(urlParams.entries()));
+        const res = mockStore.getCoordinatorStudents(Object.fromEntries(urlParams.entries()), activeUser);
         return { success: true, message: 'Students retrieved', data: res.data, pagination: res.pagination };
       }
       const studentId = endpoint.split('/')[3];
       return { success: true, message: 'Student detail retrieved', data: mockStore.getCoordinatorStudentDetail(studentId) };
     }
     if (endpoint === '/coordinator/analytics' && method === 'GET') {
-      return { success: true, message: 'Analytics retrieved', data: mockStore.getCoordinatorAnalytics() };
+      let activeUser = null;
+      try {
+        const saved = localStorage.getItem('readyup_auth_user');
+        if (saved) activeUser = JSON.parse(saved);
+      } catch {}
+      return { success: true, message: 'Analytics retrieved', data: mockStore.getCoordinatorAnalytics(activeUser) };
     }
     if (endpoint === '/coordinator/import/preview' && method === 'POST') {
       const file = data?.get?.('file') || data?.file;

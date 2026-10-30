@@ -3,6 +3,8 @@ import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import User from "../models/User.js";
 import { logAuditEvent } from "../utils/auditLogger.js";
+import { isValidInstitutionalEmail, normalizeEmail } from "../utils/validators.js";
+import { ALLOWED_DEPARTMENTS, isValidDepartment } from "../config/departments.js";
 
 const createToken = (user) => {
     if (!process.env.JWT_SECRET) {
@@ -48,7 +50,33 @@ export const register = async (req, res) => {
             });
         }
 
-        const normalizedEmail = email.trim().toLowerCase();
+        const normalizedEmail = normalizeEmail(email);
+        if (!isValidInstitutionalEmail(normalizedEmail)) {
+            return res.status(400).json({
+                success: false,
+                message: "Only institutional email addresses ending in @kkwagh.edu.in are allowed.",
+                errors: [
+                    {
+                        field: "email",
+                        message: "Only @kkwagh.edu.in email addresses are permitted",
+                    },
+                ],
+            });
+        }
+
+        if (!department || typeof department !== "string" || !isValidDepartment(department.trim())) {
+            return res.status(400).json({
+                success: false,
+                message: "Please select a valid department from the institutional options.",
+                errors: [
+                    {
+                        field: "department",
+                        message: "A valid institutional department is required",
+                    },
+                ],
+            });
+        }
+
         const existingUser = await User.findOne({ email: normalizedEmail });
 
         if (existingUser) {
@@ -66,7 +94,7 @@ export const register = async (req, res) => {
             email: normalizedEmail,
             password: hashedPassword,
             role: "student",
-            department: department ? department.trim() : "Computer Science & Engineering",
+            department: department.trim(),
             college: college ? college.trim() : "National Institute of Technology",
             graduationYear: graduationYear ? Number(graduationYear) : 2026,
             studentId: studentId ? studentId.trim() : `STU-${Date.now().toString().slice(-4)}`,
@@ -139,7 +167,20 @@ export const login = async (req, res) => {
             });
         }
 
-        const normalizedEmail = email.trim().toLowerCase();
+        const normalizedEmail = normalizeEmail(email);
+        if (!isValidInstitutionalEmail(normalizedEmail)) {
+            return res.status(400).json({
+                success: false,
+                message: "Only institutional email addresses ending in @kkwagh.edu.in are allowed.",
+                errors: [
+                    {
+                        field: "email",
+                        message: "Only @kkwagh.edu.in email addresses are permitted",
+                    },
+                ],
+            });
+        }
+
         const user = await User.findOne({
             email: normalizedEmail,
         }).select("+password");
@@ -237,7 +278,20 @@ export const updateProfile = async (req, res) => {
 
         const updateFields = {};
         if (name && typeof name === "string") updateFields.name = name.trim();
-        if (department !== undefined) updateFields.department = String(department).trim();
+        if (department !== undefined) {
+            const trimmedDept = String(department).trim();
+            if (isValidDepartment(trimmedDept) || (req.user?.department && req.user.department === trimmedDept)) {
+                updateFields.department = trimmedDept;
+            } else {
+                return res.status(400).json({
+                    success: false,
+                    message: "Please select a valid department from the institutional options.",
+                    errors: [
+                        { field: "department", message: "Invalid department selection" }
+                    ]
+                });
+            }
+        }
         if (college !== undefined) updateFields.college = String(college).trim();
         if (graduationYear !== undefined) updateFields.graduationYear = Number(graduationYear);
         if (studentId !== undefined) updateFields.studentId = String(studentId).trim();
@@ -319,7 +373,14 @@ export const forgotPassword = async (req, res) => {
             });
         }
 
-        const normalizedEmail = email.trim().toLowerCase();
+        const normalizedEmail = normalizeEmail(email);
+        if (!isValidInstitutionalEmail(normalizedEmail)) {
+            return res.status(400).json({
+                success: false,
+                message: "Only institutional email addresses ending in @kkwagh.edu.in are allowed.",
+                errors: [{ field: "email", message: "Only @kkwagh.edu.in email addresses are permitted" }],
+            });
+        }
         const userQuery = { email: normalizedEmail };
         if (role && typeof role === "string" && ["student", "coordinator", "admin"].includes(role.toLowerCase())) {
             userQuery.role = role.toLowerCase();

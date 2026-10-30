@@ -3,6 +3,7 @@ import { Link, useNavigate, Navigate } from 'react-router-dom';
 import { Award, ArrowRight, Lock, Mail, User, Building, GraduationCap, AlertCircle } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { useToast } from '../context/ToastContext';
+import { ALLOWED_DEPARTMENTS, isValidInstitutionalEmail } from '../constants/departments';
 
 export default function RegisterPage() {
   const [formData, setFormData] = useState({
@@ -10,7 +11,7 @@ export default function RegisterPage() {
     email: '',
     password: '',
     role: 'student',
-    department: 'Computer Science & Engineering',
+    department: '',
     college: 'National Institute of Technology',
     graduationYear: 2026,
     studentId: ''
@@ -48,8 +49,12 @@ export default function RegisterPage() {
       setError('Name must be at least 2 characters long');
       return;
     }
-    if (!formData.email.includes('@')) {
-      setError('Please enter a valid email address');
+    if (!isValidInstitutionalEmail(formData.email)) {
+      setError('Only institutional email addresses ending in @kkwagh.edu.in are allowed');
+      return;
+    }
+    if (!formData.department) {
+      setError('Please select your department from the approved options');
       return;
     }
     if (formData.password.length < 8) {
@@ -132,7 +137,7 @@ export default function RegisterPage() {
                     name="email"
                     value={formData.email}
                     onChange={handleChange}
-                    placeholder="student@readyup.edu"
+                    placeholder="student@kkwagh.edu.in"
                     className="w-full pl-10 pr-4 py-2.5 text-xs sm:text-sm bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl focus:outline-hidden focus:ring-2 focus:ring-teal-500/20 focus:border-teal-500 dark:text-white"
                     required
                   />
@@ -177,16 +182,20 @@ export default function RegisterPage() {
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <div>
                 <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1.5">
-                  Department / Branch
+                  Department / Branch *
                 </label>
-                <input
-                  type="text"
+                <select
                   name="department"
                   value={formData.department}
                   onChange={handleChange}
-                  placeholder="Computer Science & Engineering"
+                  required
                   className="w-full px-3.5 py-2.5 text-xs sm:text-sm bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl focus:outline-hidden focus:ring-2 focus:ring-teal-500/20 focus:border-teal-500 dark:text-white"
-                />
+                >
+                  <option value="" disabled>Select your department</option>
+                  {ALLOWED_DEPARTMENTS.map((dept) => (
+                    <option key={dept} value={dept}>{dept}</option>
+                  ))}
+                </select>
               </div>
 
               <div>

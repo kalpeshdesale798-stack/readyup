@@ -31,6 +31,7 @@ import { questionService } from '../../services/questionService';
 import { companyService } from '../../services/companyService';
 import { useToast } from '../../context/ToastContext';
 import Badge from '../common/Badge';
+import { ALLOWED_DEPARTMENTS, normalizeDepartment } from '../../constants/departments';
 
 export default function CreateMockTestWizard({ isOpen, onClose, onTestCreated, editTest = null }) {
   const { addToast } = useToast();
@@ -39,7 +40,7 @@ export default function CreateMockTestWizard({ isOpen, onClose, onTestCreated, e
   const [currentStep, setCurrentStep] = useState(1);
 
   // Available Data
-  const [departmentsList, setDepartmentsList] = useState([]);
+  const [departmentsList, setDepartmentsList] = useState(ALLOWED_DEPARTMENTS);
   const [categoriesList, setCategoriesList] = useState([]);
   const [companiesList, setCompaniesList] = useState([]);
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -113,7 +114,12 @@ export default function CreateMockTestWizard({ isOpen, onClose, onTestCreated, e
           questionService.getCategories().catch(() => []),
           companyService.getCompanies().catch(() => []),
         ]);
-        setDepartmentsList(depts || []);
+        const validDepts = Array.isArray(depts)
+          ? depts
+              .map((d) => normalizeDepartment(d))
+              .filter((d) => d && d !== 'ALL' && ALLOWED_DEPARTMENTS.includes(d))
+          : [];
+        setDepartmentsList(validDepts.length > 0 ? Array.from(new Set(validDepts)) : ALLOWED_DEPARTMENTS);
         setCategoriesList(cats || []);
         setCompaniesList(comps || []);
       } catch (err) {
@@ -139,12 +145,19 @@ export default function CreateMockTestWizard({ isOpen, onClose, onTestCreated, e
       setStartDate(effectiveStart ? new Date(effectiveStart).toISOString().slice(0, 16) : '');
       setEndDate(effectiveEnd ? new Date(effectiveEnd).toISOString().slice(0, 16) : '');
 
-      const depts = editTest.assignedDepartments?.length
+      const rawDepts = editTest.assignedDepartments?.length
         ? editTest.assignedDepartments
-        : editTest.assignedBatches?.length
-          ? editTest.assignedBatches
-          : ['ALL'];
-      setSelectedDepartments(depts);
+        : (Array.isArray(editTest.assignedBatches)
+            ? editTest.assignedBatches.filter((b) => isNaN(parseInt(b, 10)))
+            : []);
+      const normalizedDepts = Array.isArray(rawDepts) && rawDepts.length > 0
+        ? rawDepts.map((d) => normalizeDepartment(d)).filter(Boolean)
+        : [];
+      if (normalizedDepts.includes('ALL') || normalizedDepts.length === 0) {
+        setSelectedDepartments(['ALL']);
+      } else {
+        setSelectedDepartments(Array.from(new Set(normalizedDepts)));
+      }
 
       // Load existing questions
       if (Array.isArray(editTest.questions)) {
@@ -238,10 +251,10 @@ export default function CreateMockTestWizard({ isOpen, onClose, onTestCreated, e
   };
 
   const filteredDepartments = useMemo(() => {
-    if (!deptSearch.trim()) return departmentsList;
-    return departmentsList.filter((d) =>
-      d.toLowerCase().includes(deptSearch.toLowerCase().trim())
-    );
+    const list = departmentsList && departmentsList.length > 0 ? departmentsList : ALLOWED_DEPARTMENTS;
+    if (!deptSearch.trim()) return list;
+    const query = deptSearch.toLowerCase().trim();
+    return list.filter((d) => d.toLowerCase().includes(query));
   }, [departmentsList, deptSearch]);
 
   // Method A: Handle CSV File Preview
@@ -533,7 +546,9 @@ export default function CreateMockTestWizard({ isOpen, onClose, onTestCreated, e
         durationMinutes: Number(durationMinutes),
         passingScore: Number(passingScore),
         assignedDepartments: selectedDepartments,
-        assignedBatches: selectedDepartments,
+        assignedBatches: editTest && Array.isArray(editTest.assignedBatches) && editTest.assignedBatches.length > 0
+          ? editTest.assignedBatches
+          : (selectedDepartments.includes('ALL') ? ['ALL'] : []),
         isScheduled: Boolean(isScheduled),
         startDate: startDate ? new Date(startDate).toISOString() : null,
         endDate: endDate ? new Date(endDate).toISOString() : null,
@@ -764,23 +779,28 @@ export default function CreateMockTestWizard({ isOpen, onClose, onTestCreated, e
                 </div>
 
                 <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2.5 pt-1">
-                  {/* Explicit All Departments Option */}
-                  <div
-                    onClick={() => handleToggleDepartment('ALL')}
-                    className={`p-3 rounded-xl border cursor-pointer transition-all flex items-center justify-between ${
-                      selectedDepartments.includes('ALL')
-                        ? 'bg-teal-50 dark:bg-teal-950/60 border-teal-500 text-teal-900 dark:text-teal-200 shadow-xs'
-                        : 'bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-700 hover:border-slate-300 text-slate-700 dark:text-slate-300'
-                    }`}
-                  >
-                    <div>
-                      <div className="text-xs font-bold">All Departments</div>
-                      <div className="text-[10px] text-slate-400">Campus-wide placement simulation</div>
+                  {/* Single All Departments Option */}
+                  {(!deptSearch.trim() ||
+                    'all departments'.includes(deptSearch.toLowerCase().trim()) ||
+                    'all'.includes(deptSearch.toLowerCase().trim()) ||
+                    'campus'.includes(deptSearch.toLowerCase().trim())) && (
+                    <div
+                      onClick={() => handleToggleDepartment('ALL')}
+                      className={`p-3 rounded-xl border cursor-pointer transition-all flex items-center justify-between ${
+                        selectedDepartments.includes('ALL')
+                          ? 'bg-teal-50 dark:bg-teal-950/60 border-teal-500 text-teal-900 dark:text-teal-200 shadow-xs'
+                          : 'bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-700 hover:border-slate-300 text-slate-700 dark:text-slate-300'
+                      }`}
+                    >
+                      <div>
+                        <div className="text-xs font-bold">All Departments</div>
+                        <div className="text-[10px] text-slate-400">Campus-wide placement simulation</div>
+                      </div>
+                      {selectedDepartments.includes('ALL') && (
+                        <CheckCircle2 className="w-4 h-4 text-teal-600 shrink-0" />
+                      )}
                     </div>
-                    {selectedDepartments.includes('ALL') && (
-                      <CheckCircle2 className="w-4 h-4 text-teal-600" />
-                    )}
-                  </div>
+                  )}
 
                   {filteredDepartments.map((dept) => {
                     const isSelected = selectedDepartments.includes(dept);

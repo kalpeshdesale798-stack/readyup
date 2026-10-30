@@ -1,6 +1,7 @@
 // Stateful in-memory mock store with localStorage persistence
 // Powers offline functionality and full interactivity matching the API contract 1:1
 
+import { ALLOWED_DEPARTMENTS, isValidInstitutionalEmail, normalizeEmail, normalizeDepartment } from '../constants/departments.js';
 import {
   initialCategories,
   initialQuestions,
@@ -123,9 +124,68 @@ class MockStore {
     setStored(STORAGE_KEYS.ADMIN_LOGS, this.auditLogs);
   }
 
+  getActiveUser() {
+    try {
+      if (typeof localStorage !== 'undefined') {
+        const saved = localStorage.getItem('readyup_auth_user');
+        if (saved) return JSON.parse(saved);
+      }
+    } catch {}
+    return this.users?.find((u) => u.role === 'coordinator') || null;
+  }
+
+  isCoordinatorAuthorizedForTest(user, test) {
+    if (!user || !test) return false;
+
+    // Strict: Inactive or archived tests are not accessible to coordinators or admins
+    if (test.isActive === false || test.status === 'archived') {
+      return false;
+    }
+
+    if (user.role === 'admin') return true;
+    if (user.role !== 'coordinator') return false;
+
+    const testCreatorId = test.createdBy ? (test.createdBy._id ? String(test.createdBy._id) : String(test.createdBy)) : null;
+    const userId = user._id ? String(user._id) : (user.id ? String(user.id) : null);
+
+    // 1. Author ownership
+    if (testCreatorId && userId && testCreatorId === userId) {
+      return true;
+    }
+
+    // 2. Department exact match (case-insensitive)
+    const userDept = typeof user.department === 'string' ? user.department.trim().toLowerCase() : '';
+    if (userDept && Array.isArray(test.assignedDepartments)) {
+      const hasDeptMatch = test.assignedDepartments.some((d) => {
+        if (typeof d !== 'string') return false;
+        return d.trim().toLowerCase() === userDept;
+      });
+      if (hasDeptMatch) return true;
+    }
+
+    // 3. Open institutional test: createdBy must be null/missing AND BOTH departments and batches must be unrestricted
+    const isArrayUnrestricted = (arr, allowedTokens) => {
+      if (!arr || !Array.isArray(arr) || arr.length === 0) return true;
+      return arr.every((item) => {
+        if (typeof item !== 'string') return false;
+        return allowedTokens.includes(item.trim().toLowerCase());
+      });
+    };
+
+    const isDeptsOpen = isArrayUnrestricted(test.assignedDepartments, ['all', 'all departments']);
+    const isBatchesOpen = isArrayUnrestricted(test.assignedBatches, ['all', 'all batches']);
+    const isInstitutional = (!testCreatorId) && isDeptsOpen && isBatchesOpen;
+
+    return isInstitutional;
+  }
+
   // --- Auth & Users ---
   login(email, password, requiredRole) {
-    const user = this.users.find((u) => u.email.toLowerCase() === email.toLowerCase());
+    const normalizedEmail = normalizeEmail(email);
+    if (!isValidInstitutionalEmail(normalizedEmail)) {
+      throw { status: 400, message: 'Only institutional email addresses ending in @kkwagh.edu.in are allowed' };
+    }
+    const user = this.users.find((u) => u.email.toLowerCase() === normalizedEmail);
     if (!user) {
       throw { status: 401, message: 'Invalid email or password' };
     }
@@ -157,7 +217,14 @@ class MockStore {
   }
 
   register(userData) {
-    const exists = this.users.some((u) => u.email.toLowerCase() === userData.email.toLowerCase());
+    const normalizedEmail = normalizeEmail(userData.email);
+    if (!isValidInstitutionalEmail(normalizedEmail)) {
+      throw { status: 400, message: 'Only institutional email addresses ending in @kkwagh.edu.in are allowed' };
+    }
+    if (!userData.department || !ALLOWED_DEPARTMENTS.includes(userData.department.trim())) {
+      throw { status: 400, message: 'Please select a valid department from the institutional options.' };
+    }
+    const exists = this.users.some((u) => u.email.toLowerCase() === normalizedEmail);
     if (exists) {
       throw { status: 409, message: 'An account with this email address already exists' };
     }
@@ -165,9 +232,9 @@ class MockStore {
     const newUser = {
       _id: 'usr_' + Date.now(),
       name: userData.name,
-      email: userData.email,
+      email: normalizedEmail,
       role: userData.role || 'student',
-      department: userData.department || 'Computer Science & Engineering',
+      department: userData.department.trim(),
       college: userData.college || 'National Institute of Technology',
       graduationYear: userData.graduationYear ? Number(userData.graduationYear) : 2026,
       studentId: userData.studentId || `STU-${Date.now().toString().slice(-4)}`,
@@ -186,9 +253,16 @@ class MockStore {
     const user = this.users.find((u) => u._id === userId);
     if (!user) throw { status: 404, message: 'User not found' };
 
+    if (updateData.department !== undefined) {
+      const trimmed = String(updateData.department).trim();
+      if (!ALLOWED_DEPARTMENTS.includes(trimmed) && user.department !== trimmed) {
+        throw { status: 400, message: 'Please select a valid department from the institutional options.' };
+      }
+    }
+
     Object.assign(user, {
       name: updateData.name || user.name,
-      department: updateData.department !== undefined ? updateData.department : user.department,
+      department: updateData.department !== undefined ? String(updateData.department).trim() : user.department,
       college: updateData.college !== undefined ? updateData.college : user.college,
       graduationYear: updateData.graduationYear ? Number(updateData.graduationYear) : user.graduationYear,
       studentId: updateData.studentId !== undefined ? updateData.studentId : user.studentId
@@ -336,11 +410,27 @@ class MockStore {
       } else if (t.endDate && now > new Date(t.endDate)) {
         scheduleStatus = 'closed';
       }
+
+      // Match attempt strictly by stable mock-test ID
+      const testId = String(t._id || t.id);
+      const matchingAttempt = (this.attempts || []).find((a) => {
+        const attemptTestId = a.mockTestId || a.testId || a.mockTest;
+        return attemptTestId ? String(attemptTestId) === testId : false;
+      });
+
+      const userAttempt = t.userAttempt || (matchingAttempt ? {
+        attemptId: matchingAttempt.id || matchingAttempt.attemptId,
+        status: matchingAttempt.status || 'completed',
+        score: matchingAttempt.score,
+        result: matchingAttempt.passed ? 'passed' : 'failed'
+      } : null);
+
       return {
         ...t,
         scheduleStatus,
         totalMarks: t.totalMarks || t.totalQuestions || 15,
-        passingMarks: Math.round(((t.totalMarks || t.totalQuestions || 15) * (t.passingScore || 60)) / 100)
+        passingMarks: Math.round(((t.totalMarks || t.totalQuestions || 15) * (t.passingScore || 60)) / 100),
+        userAttempt
       };
     });
   }
@@ -548,6 +638,8 @@ class MockStore {
     // Record in attempts history
     this.attempts.unshift({
       id: attemptId,
+      mockTestId: session?.mockTestId || session?.testId,
+      testId: session?.mockTestId || session?.testId,
       title: result.title,
       type: result.type,
       submittedAt: result.submittedAt,
@@ -846,11 +938,14 @@ class MockStore {
     };
   }
 
-  getCoordinatorMockTests({ search, category, status, page = 1, limit = 20 } = {}) {
+  getCoordinatorMockTests({ search, category, status, page = 1, limit = 20 } = {}, user = null) {
+    const activeUser = user || this.getActiveUser();
     const students = this.users.filter((u) => u.role === 'student');
     const totalStudents = students.length || 24;
 
-    let list = this.mockTests.map((t, idx) => {
+    const authorized = this.mockTests.filter((t) => this.isCoordinatorAuthorizedForTest(activeUser, t));
+
+    let list = authorized.map((t, idx) => {
       const eligibleCount = t.assignedBatches?.length ? 15 : totalStudents;
       const uniqueStudents = Math.min(eligibleCount, 12 + (idx % 6));
       const completed = Math.min(uniqueStudents, 10 + (idx % 4));
@@ -869,11 +964,15 @@ class MockStore {
         durationMinutes: t.durationMinutes || 30,
         totalQuestions: t.totalQuestions || 15,
         passingScore: t.passingScore || 60,
+        totalMarks: t.totalMarks || t.totalQuestions || 15,
+        assignedDepartments: t.assignedDepartments || [],
         assignedBatches: t.assignedBatches || [],
         assignedStudentsCount: t.assignedStudents?.length || 0,
         startDate: t.startDate || null,
         endDate: t.endDate || null,
         isScheduled: Boolean(t.isScheduled),
+        status: t.status || (t.isActive !== false ? 'published' : 'archived'),
+        isActive: t.isActive !== false,
         scheduleStatus: t.endDate && new Date() > new Date(t.endDate) ? 'closed' : t.startDate && new Date() < new Date(t.startDate) ? 'upcoming' : 'active',
         eligibleStudentsCount: eligibleCount,
         uniqueStudentsAttempted: uniqueStudents,
@@ -923,9 +1022,13 @@ class MockStore {
     };
   }
 
-  getCoordinatorMockTestDetail(testId) {
+  getCoordinatorMockTestDetail(testId, user = null) {
+    const activeUser = user || this.getActiveUser();
     const test = this.mockTests.find((t) => t._id === testId || t.slug === testId);
     if (!test) throw { status: 404, message: 'Mock test not found' };
+    if (!this.isCoordinatorAuthorizedForTest(activeUser, test)) {
+      throw { status: 403, message: 'Access denied: You are not authorized to view this mock test' };
+    }
     const students = this.users.filter((u) => u.role === 'student');
     return {
       ...test,
@@ -945,36 +1048,52 @@ class MockStore {
     };
   }
 
-  getCoordinatorMockTestAttempts(testId, { search, status, page = 1, limit = 20 } = {}) {
+  getCoordinatorMockTestAttempts(testId, { search, status, department, page = 1, limit = 20 } = {}, user = null) {
+    const activeUser = user || this.getActiveUser();
     const students = this.users.filter((u) => u.role === 'student');
-    const test = this.mockTests.find((t) => t._id === testId) || this.mockTests[0];
 
-    let attempts = students.map((s, idx) => {
-      const isCompleted = idx % 5 !== 0;
-      const score = 10 + (idx % 6);
-      const totalMarks = test?.totalQuestions || 15;
-      const accuracy = Math.round((score / totalMarks) * 100);
+    let matchingTests = [];
+    if (testId === 'all') {
+      matchingTests = this.mockTests.filter((t) => this.isCoordinatorAuthorizedForTest(activeUser, t));
+    } else {
+      const test = this.mockTests.find((t) => t._id === testId || t.slug === testId);
+      if (!test) throw { status: 404, message: 'Mock test not found' };
+      if (!this.isCoordinatorAuthorizedForTest(activeUser, test)) {
+        throw { status: 403, message: 'Access denied: You are not authorized to view attempts for this mock test' };
+      }
+      matchingTests = [test];
+    }
 
-      return {
-        _id: `att_${testId}_${s._id}`,
-        attemptId: `att_${testId}_${s._id}`,
-        studentId: s.studentId || `STU-2026-${String(idx + 1).padStart(3, '0')}`,
-        studentName: s.name,
-        studentEmail: s.email,
-        department: s.department || 'Computer Science & Engineering',
-        graduationYear: s.graduationYear || 2026,
-        testTitle: test?.title || 'Mock Test',
-        score: isCompleted ? score : 0,
-        totalMarks,
-        accuracy: isCompleted ? accuracy : 0,
-        status: isCompleted ? 'completed' : 'in-progress',
-        result: isCompleted ? (accuracy >= 60 ? 'Passed' : 'Needs Review') : 'Incomplete',
-        attemptNumber: 1 + (idx % 2),
-        startTime: new Date(Date.now() - 3600000 * (idx + 1)).toISOString(),
-        submissionTime: isCompleted ? new Date(Date.now() - 3600000 * idx).toISOString() : null,
-        durationSeconds: isCompleted ? 1200 + idx * 30 : 450,
-        createdAt: new Date(Date.now() - 3600000 * (idx + 1)).toISOString()
-      };
+    let attempts = [];
+    matchingTests.forEach((t) => {
+      students.forEach((s, idx) => {
+        const isCompleted = idx % 5 !== 0;
+        const score = 10 + (idx % 6);
+        const totalMarks = t.totalQuestions || 15;
+        const accuracy = Math.round((score / totalMarks) * 100);
+
+        attempts.push({
+          _id: `att_${t._id}_${s._id}`,
+          attemptId: `att_${t._id}_${s._id}`,
+          mockTestId: t._id,
+          studentId: s.studentId || `STU-2026-${String(idx + 1).padStart(3, '0')}`,
+          studentName: s.name,
+          studentEmail: s.email,
+          department: s.department || 'Computer Engineering',
+          graduationYear: s.graduationYear || 2026,
+          testTitle: t.title || 'Mock Test',
+          score: isCompleted ? score : 0,
+          totalMarks,
+          accuracy: isCompleted ? accuracy : 0,
+          status: isCompleted ? 'completed' : 'in-progress',
+          result: isCompleted ? (accuracy >= 60 ? 'Passed' : 'Needs Review') : 'Incomplete',
+          attemptNumber: 1 + (idx % 2),
+          startTime: new Date(Date.now() - 3600000 * (idx + 1)).toISOString(),
+          submissionTime: isCompleted ? new Date(Date.now() - 3600000 * idx).toISOString() : null,
+          durationSeconds: isCompleted ? 1200 + idx * 30 : 450,
+          createdAt: new Date(Date.now() - 3600000 * (idx + 1)).toISOString()
+        });
+      });
     });
 
     if (search) {
@@ -983,6 +1102,25 @@ class MockStore {
     }
     if (status && status !== 'all') {
       attempts = attempts.filter((a) => a.status === status);
+    }
+    if (department && department !== 'all') {
+      const d2 = department.toLowerCase();
+      attempts = attempts.filter((a) => {
+        const d1 = (a.department || '').toLowerCase();
+        if (d1 === d2) return true;
+        if (d1.replace(/\s+engineering$/, '') === d2.replace(/\s+engineering$/, '')) return true;
+        if (d2 === 'e & tc' && (d1 === 'etc' || d1 === 'e&tc' || d1.includes('telecom') || d1.includes('communication') || d1 === 'entc')) return true;
+        if (d2 === 'aids' && (d1 === 'ai & ds' || d1 === 'ai and ds' || d1.includes('intelligence') || d1.includes('data science'))) return true;
+        if (d2 === 'csd' && (d1 === 'cs & design' || d1.includes('design'))) return true;
+        if (d2 === 'computer engineering' && (d1.includes('computer') || d1 === 'cse')) return true;
+        if (d2 === 'information technology' && (d1 === 'it' || d1.includes('information technology'))) return true;
+        if (d2 === 'mechanical' && (d1 === 'mech' || d1.includes('mechanical'))) return true;
+        if (d2 === 'civil' && d1.includes('civil')) return true;
+        if (d2 === 'electrical' && (d1 === 'ee' || (d1.includes('electrical') && !d1.includes('electronics')))) return true;
+        if (d2 === 'chemical' && d1.includes('chemical')) return true;
+        if (d2 === 'robotics and automation' && (d1.includes('robotics') || d1.includes('automation'))) return true;
+        return false;
+      });
     }
 
     const pageNum = Math.max(1, parseInt(page, 10) || 1);
@@ -1016,17 +1154,7 @@ class MockStore {
   }
 
   getDepartments() {
-    return [
-      "Computer Science & Engineering",
-      "Information Technology",
-      "Electronics & Communication Engineering",
-      "Electrical Engineering",
-      "Mechanical Engineering",
-      "Civil Engineering",
-      "Computer Engineering",
-      "Central Administration",
-      "Training & Placement Cell"
-    ];
+    return [...ALLOWED_DEPARTMENTS];
   }
 
   createMockTest(data) {
@@ -1043,13 +1171,14 @@ class MockStore {
       totalMarks: data.totalMarks || data.questions?.length || 15,
       passingScore: Number(data.passingScore) || 60,
       assignedDepartments: data.assignedDepartments || [],
-      assignedBatches: data.assignedDepartments || [],
+      assignedBatches: data.assignedBatches || [],
       startDate: data.startDate || null,
       endDate: data.endDate || null,
       isScheduled: Boolean(data.isScheduled),
       status: data.status || 'published',
       isActive: data.status !== 'archived',
       questions: data.questions || [],
+      createdBy: data.createdBy || (this.getActiveUser()?._id ? String(this.getActiveUser()._id) : (this.getActiveUser()?.id ? String(this.getActiveUser().id) : 'coord_mock_user')),
       createdAt: new Date().toISOString()
     };
     this.mockTests.unshift(newTest);
@@ -1063,8 +1192,9 @@ class MockStore {
     this.mockTests[idx] = {
       ...this.mockTests[idx],
       ...data,
-      assignedDepartments: data.assignedDepartments || this.mockTests[idx].assignedDepartments,
-      assignedBatches: data.assignedDepartments || this.mockTests[idx].assignedBatches,
+      assignedDepartments: data.assignedDepartments !== undefined ? data.assignedDepartments : this.mockTests[idx].assignedDepartments,
+      assignedBatches: data.assignedBatches !== undefined ? data.assignedBatches : this.mockTests[idx].assignedBatches,
+      isActive: data.status ? data.status !== 'archived' : (data.isActive !== undefined ? data.isActive : this.mockTests[idx].isActive),
     };
     this.saveState();
     return this.mockTests[idx];
@@ -1099,20 +1229,73 @@ class MockStore {
     return this.mockTests[idx];
   }
 
-  getCoordinatorStudents({ search, department, graduationYear, page = 1, limit = 20 } = {}) {
+  getCoordinatorStudents({ search, department, graduationYear, testId, page = 1, limit = 20 } = {}, user = null) {
+    const activeUser = user || this.getActiveUser();
     let list = this.users.filter((u) => u.role === 'student');
+
+    if (testId && testId !== 'all') {
+      const test = this.mockTests.find((t) => t._id === testId || t.slug === testId);
+      if (!test) throw { status: 404, message: 'Mock test not found' };
+      if (!this.isCoordinatorAuthorizedForTest(activeUser, test)) {
+        throw { status: 403, message: 'Access denied: You are not authorized to view students for this mock test' };
+      }
+
+      if (test.assignedStudents && test.assignedStudents.length > 0) {
+        list = list.filter((s) => test.assignedStudents.includes(s._id) || test.assignedStudents.includes(s.studentId));
+      } else {
+        // 1. Department filter
+        const rawDepts = (test.assignedDepartments && test.assignedDepartments.length > 0)
+          ? test.assignedDepartments
+          : (test.assignedBatches || []).filter((b) => isNaN(parseInt(b, 10)) && b.toLowerCase() !== 'all' && b.toLowerCase() !== 'all batches');
+
+        const isDeptsOpen = rawDepts.length === 0 || rawDepts.every((d) => {
+          const s = String(d || '').trim().toLowerCase();
+          return s === 'all' || s === 'all departments';
+        });
+
+        if (!isDeptsOpen) {
+          list = list.filter((s) => rawDepts.some((d) => {
+            const sDept = (s.department || '').trim().toLowerCase();
+            const tDept = String(d || '').trim().toLowerCase();
+            if (sDept === tDept || (sDept && (sDept.includes(tDept) || tDept.includes(sDept)))) return true;
+            const normD = normalizeDepartment(tDept);
+            const normS = normalizeDepartment(sDept);
+            return Boolean(normD && normS && normD === normS);
+          }));
+        }
+
+        // 2. Batch / graduation year filter
+        const rawBatches = (test.assignedBatches || []).filter((b) => !isNaN(parseInt(b, 10)));
+        if (rawBatches.length > 0) {
+          const years = rawBatches.map((b) => String(parseInt(b, 10)));
+          list = list.filter((s) => years.includes(String(s.graduationYear)));
+        }
+      }
+    }
 
     if (search) {
       const q = search.toLowerCase();
       list = list.filter((s) => s.name.toLowerCase().includes(q) || s.email.toLowerCase().includes(q) || (s.studentId && s.studentId.toLowerCase().includes(q)));
     }
     if (department && department !== 'all') {
-      const deptLower = department.toLowerCase();
-      list = list.filter((s) => s.department && (s.department.toLowerCase().includes(deptLower) || deptLower.includes(s.department.toLowerCase())));
+      list = list.filter((s) => {
+        if (!s.department) return false;
+        if (s.department.toLowerCase() === department.toLowerCase()) return true;
+        const normS = normalizeDepartment(s.department);
+        const normD = normalizeDepartment(department);
+        if (normS && normD && normS === normD) return true;
+        return s.department.toLowerCase().includes(department.toLowerCase()) || department.toLowerCase().includes(s.department.toLowerCase());
+      });
     }
     if (graduationYear && graduationYear !== 'all') {
-      list = list.filter((s) => String(s.graduationYear) === String(graduationYear));
+      list = list.filter((s) => String(s.graduationYear).trim() === String(graduationYear).trim());
     }
+
+    const availableYears = Array.from(new Set(
+      this.users
+        .filter((u) => u.role === 'student' && u.graduationYear)
+        .map((u) => String(u.graduationYear).trim())
+    )).sort((a, b) => b.localeCompare(a));
 
     const pageNum = Math.max(1, parseInt(page, 10) || 1);
     const limitNum = Math.min(100, Math.max(1, parseInt(limit, 10) || 20));
@@ -1136,6 +1319,7 @@ class MockStore {
 
     return {
       data: formatted,
+      availableYears,
       pagination: {
         total: list.length,
         page: pageNum,
@@ -1203,7 +1387,9 @@ class MockStore {
     };
   }
 
-  getCoordinatorAnalytics() {
+  getCoordinatorAnalytics(user = null) {
+    const activeUser = user || this.getActiveUser();
+    const authorizedTests = this.mockTests.filter((t) => this.isCoordinatorAuthorizedForTest(activeUser, t));
     const topics = [
       { topic: 'Time and Work', category: 'Quantitative Aptitude', totalQuestions: 120, answeredCount: 110, correctCount: 92, accuracy: 84, status: 'strong' },
       { topic: 'Syllogisms', category: 'Logical Reasoning', totalQuestions: 95, answeredCount: 90, correctCount: 72, accuracy: 80, status: 'strong' },
@@ -1224,22 +1410,34 @@ class MockStore {
       { _id: 'risk_3', name: 'Siddharth Rao', email: 'siddharth.rao@readyup.edu', studentId: 'STU-2026-008', department: 'Electrical Engineering', completedTests: 4, avgAccuracy: 48, failedCount: 2 }
     ];
 
-    const testComparison = this.mockTests.slice(0, 6).map((t, i) => ({
-      title: t.title,
-      category: t.category || 'General',
-      company: t.company || 'Placement',
-      durationMinutes: t.durationMinutes || 30,
-      totalQuestions: t.totalQuestions || 15,
-      attemptsCount: 20 + i * 5,
-      averageScore: 11.5 + (i % 3)
-    }));
+    const testComparison = (authorizedTests.length > 0 ? authorizedTests : this.mockTests).slice(0, 10).map((t, i) => {
+      const avgScore = 11.5 + (i % 3);
+      const totalQuestions = t.totalQuestions || 15;
+      const averageAccuracy = Math.min(100, Math.round((avgScore / totalQuestions) * 100));
+      return {
+        _id: t._id,
+        title: t.title,
+        category: t.category || 'General',
+        company: t.company || 'Placement',
+        durationMinutes: t.durationMinutes || 30,
+        totalQuestions,
+        attemptsCount: 20 + i * 5,
+        averageScore: avgScore,
+        averageAccuracy
+      };
+    });
+
+    const overallAverageAccuracy = testComparison.length > 0
+      ? Math.round(testComparison.reduce((sum, t) => sum + (t.averageAccuracy || 0), 0) / testComparison.length)
+      : 69;
 
     return {
       topicAccuracy: topics,
       strongTopics,
       weakTopics,
       atRiskStudents,
-      testComparison
+      testComparison,
+      overallAverageAccuracy
     };
   }
 

@@ -500,9 +500,9 @@ export const initialStudentData = {
   student: {
     _id: "usr_student_01",
     name: "Aarav Sharma",
-    email: "student@readyup.edu",
+    email: "student@kkwagh.edu.in",
     role: "student",
-    department: "Computer Science & Engineering",
+    department: "Computer Engineering",
     college: "National Institute of Technology",
     graduationYear: 2026,
     studentId: "CS2026-042",
@@ -691,9 +691,9 @@ export const initialAdminData = {
     {
       _id: "usr_student_01",
       name: "Aarav Sharma",
-      email: "student@readyup.edu",
+      email: "student@kkwagh.edu.in",
       role: "student",
-      department: "Computer Science & Engineering",
+      department: "Computer Engineering",
       college: "National Institute of Technology",
       graduationYear: 2026,
       studentId: "CS2026-042",
@@ -703,7 +703,7 @@ export const initialAdminData = {
     {
       _id: "usr_coord_01",
       name: "Prof. Sunita Patil",
-      email: "coordinator@readyup.edu",
+      email: "coordinator@kkwagh.edu.in",
       role: "coordinator",
       department: "Training & Placement Cell",
       college: "National Institute of Technology",
@@ -714,7 +714,7 @@ export const initialAdminData = {
     {
       _id: "usr_admin_01",
       name: "Dr. Vikram Malhotra",
-      email: "admin@readyup.edu",
+      email: "admin@kkwagh.edu.in",
       role: "admin",
       department: "Dean Office & Academics",
       college: "National Institute of Technology",
@@ -725,7 +725,7 @@ export const initialAdminData = {
     {
       _id: "usr_student_02",
       name: "Neha Deshmukh",
-      email: "neha.d@readyup.edu",
+      email: "neha.d@kkwagh.edu.in",
       role: "student",
       department: "Information Technology",
       college: "National Institute of Technology",
@@ -737,9 +737,9 @@ export const initialAdminData = {
     {
       _id: "usr_student_03",
       name: "Rohan Verma",
-      email: "rohan.v@readyup.edu",
+      email: "rohan.v@kkwagh.edu.in",
       role: "student",
-      department: "Electronics & Communication",
+      department: "E & TC",
       college: "National Institute of Technology",
       graduationYear: 2026,
       studentId: "EC2026-085",
@@ -751,7 +751,7 @@ export const initialAdminData = {
     {
       _id: "log_001",
       action: "USER_LOGIN",
-      performedBy: "Dr. Vikram Malhotra (admin@readyup.edu)",
+      performedBy: "Dr. Vikram Malhotra (admin@kkwagh.edu.in)",
       targetType: "AUTH",
       details: "Successful admin authentication from campus intranet",
       ipAddress: "192.168.1.10",

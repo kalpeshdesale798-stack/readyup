@@ -1,5 +1,7 @@
 import { useState, useEffect } from 'react';
+import { Link, useSearchParams } from 'react-router-dom';
 import {
+  ArrowLeft,
   Timer,
   Search,
   Filter,
@@ -28,11 +30,26 @@ import CreateMockTestWizard from '../components/coordinator/CreateMockTestWizard
 import ArchiveTestModal from '../components/coordinator/ArchiveTestModal';
 
 export default function CoordinatorMockTestsPage() {
+  const [searchParams, setSearchParams] = useSearchParams();
+  const metric = searchParams.get('metric');
+  const initialStatus = searchParams.get('status') || (metric === 'available' ? 'active' : 'all');
+
   const [tests, setTests] = useState([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
   const [categoryFilter, setCategoryFilter] = useState('all');
-  const [statusFilter, setStatusFilter] = useState('all');
+  const [statusFilter, setStatusFilter] = useState(initialStatus);
+
+  const handleStatusFilterChange = (newStatus) => {
+    setStatusFilter(newStatus);
+    const next = new URLSearchParams(searchParams);
+    if (newStatus && newStatus !== 'all') {
+      next.set('status', newStatus);
+    } else {
+      next.delete('status');
+    }
+    setSearchParams(next);
+  };
 
   // Unified Wizard and Archive states
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
@@ -172,6 +189,17 @@ export default function CoordinatorMockTestsPage() {
 
   return (
     <div className="space-y-8 max-w-7xl mx-auto pb-16 animate-in fade-in duration-300">
+      {/* Back to Coordinator Dashboard */}
+      <div>
+        <Link
+          to="/coordinator/dashboard"
+          className="inline-flex items-center gap-1.5 text-xs font-semibold text-slate-500 hover:text-teal-600 dark:text-slate-400 dark:hover:text-teal-400 mb-2 transition-colors cursor-pointer"
+        >
+          <ArrowLeft className="w-3.5 h-3.5" />
+          <span>Back to Coordinator Dashboard</span>
+        </Link>
+      </div>
+
       {/* Page Header */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
@@ -199,6 +227,23 @@ export default function CoordinatorMockTestsPage() {
         </button>
       </div>
 
+      {/* Contextual Banner for Available Mock Tests */}
+      {metric === 'available' && (
+        <div className="p-4 rounded-2xl bg-teal-50/90 dark:bg-teal-950/40 border border-teal-200/80 dark:border-teal-900/60 flex items-center gap-3">
+          <div className="p-2 rounded-xl bg-teal-100 dark:bg-teal-900/60 text-teal-700 dark:text-teal-300">
+            <Timer className="w-5 h-5" />
+          </div>
+          <div>
+            <h2 className="text-sm font-bold text-teal-900 dark:text-teal-100">
+              Available Mock Tests & Placement Simulations
+            </h2>
+            <p className="text-xs text-teal-700 dark:text-teal-300 mt-0.5">
+              Displaying active and scheduled aptitude tests authorized for your coordinator scope.
+            </p>
+          </div>
+        </div>
+      )}
+
       {/* Filter and Search Bar */}
       <div className="bg-white dark:bg-slate-800/90 rounded-2xl p-4 sm:p-5 border border-slate-100 dark:border-slate-800 card-shadow flex flex-col md:flex-row md:items-center justify-between gap-4">
         <form onSubmit={handleSearchSubmit} className="relative flex-1">
@@ -217,7 +262,7 @@ export default function CoordinatorMockTestsPage() {
             <span className="text-xs text-slate-500 font-medium">Status:</span>
             <select
               value={statusFilter}
-              onChange={(e) => setStatusFilter(e.target.value)}
+              onChange={(e) => handleStatusFilterChange(e.target.value)}
               className="text-xs py-2 px-3 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-300 focus:outline-hidden focus:ring-2 focus:ring-teal-500"
             >
               <option value="all">All Statuses</option>

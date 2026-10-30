@@ -4,6 +4,7 @@ import { Award, ArrowRight, Lock, Mail, AlertCircle, CheckCircle2, X, KeyRound, 
 import { useAuth } from '../context/AuthContext';
 import { useToast } from '../context/ToastContext';
 import { authService } from '../services/authService';
+import { isValidInstitutionalEmail } from '../constants/departments';
 
 export default function LoginPage() {
   const [email, setEmail] = useState('');
@@ -100,8 +101,8 @@ export default function LoginPage() {
     e.preventDefault();
     setError('');
 
-    if (!email.trim()) {
-      setError('Please enter a valid email address');
+    if (!isValidInstitutionalEmail(email)) {
+      setError('Only institutional email addresses ending in @kkwagh.edu.in are allowed');
       return;
     }
     if (!password) {
@@ -147,8 +148,8 @@ export default function LoginPage() {
     setForgotSuccess('');
     setSmtpWarning(null);
 
-    if (!forgotEmail.trim()) {
-      setForgotError('Please enter a valid email address');
+    if (!isValidInstitutionalEmail(forgotEmail)) {
+      setForgotError('Only institutional email addresses ending in @kkwagh.edu.in are allowed');
       return;
     }
 
@@ -283,7 +284,7 @@ export default function LoginPage() {
                   type="email"
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
-                  placeholder="Enter your email address"
+                  placeholder="student@kkwagh.edu.in"
                   className="w-full pl-10 pr-4 py-2.5 text-xs sm:text-sm bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl focus:outline-hidden focus:ring-2 focus:ring-teal-500/20 focus:border-teal-500 dark:text-white"
                   required
                 />

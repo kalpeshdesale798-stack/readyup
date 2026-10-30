@@ -1,5 +1,7 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef, useMemo } from 'react';
+import { Link, useSearchParams } from 'react-router-dom';
 import {
+  ArrowLeft,
   Users,
   Search,
   Filter,
@@ -14,19 +16,35 @@ import {
   AlertCircle,
   TrendingUp,
   X,
-  BookOpen
+  BookOpen,
+  ChevronDown,
+  Check
 } from 'lucide-react';
 import { coordinatorService } from '../services/coordinatorService';
 import { useToast } from '../context/ToastContext';
 import Badge from '../components/common/Badge';
 import AttemptReviewModal from '../components/coordinator/AttemptReviewModal';
+import { ALLOWED_DEPARTMENTS } from '../constants/departments';
 
 export default function CoordinatorStudentsPage() {
+  const [searchParams, setSearchParams] = useSearchParams();
+  const metric = searchParams.get('metric');
+  const initialTestId = searchParams.get('testId') || 'all';
+
   const [students, setStudents] = useState([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
   const [departmentFilter, setDepartmentFilter] = useState('all');
   const [yearFilter, setYearFilter] = useState('all');
+  const [testFilter, setTestFilter] = useState(initialTestId);
+  const [mockTestsList, setMockTestsList] = useState([]);
+
+  // Typeable & Searchable Batch Filter States
+  const [isYearOpen, setIsYearOpen] = useState(false);
+  const [yearSearch, setYearSearch] = useState('');
+  const [availableBatches, setAvailableBatches] = useState([]);
+  const yearDropdownRef = useRef(null);
+  const yearInputRef = useRef(null);
 
   // Student Profile Detail Drawer / Modal
   const [activeStudentId, setActiveStudentId] = useState(null);
@@ -38,15 +56,38 @@ export default function CoordinatorStudentsPage() {
 
   const { addToast } = useToast();
 
+  useEffect(() => {
+    coordinatorService.getMockTests().then((res) => {
+      setMockTestsList(res.data || []);
+    }).catch(() => {});
+
+    // Authoritative batch retrieval across all active candidates
+    coordinatorService.getStudents({ limit: 100 }).then((res) => {
+      const fromData = (res.data || []).map((s) => s.graduationYear).filter(Boolean).map(String);
+      const fromYears = (res.availableYears || []).map(String);
+      const allYears = Array.from(new Set([...fromYears, ...fromData])).sort((a, b) => b.localeCompare(a));
+      if (allYears.length > 0) {
+        setAvailableBatches(allYears);
+      }
+    }).catch(() => {});
+  }, []);
+
   const loadStudents = async () => {
     setLoading(true);
     try {
       const res = await coordinatorService.getStudents({
         search: search || undefined,
         department: departmentFilter !== 'all' ? departmentFilter : undefined,
-        graduationYear: yearFilter !== 'all' ? yearFilter : undefined
+        graduationYear: yearFilter !== 'all' ? yearFilter : undefined,
+        testId: testFilter !== 'all' ? testFilter : undefined
       });
       setStudents(res.data || []);
+      if (res.availableYears && Array.isArray(res.availableYears) && res.availableYears.length > 0) {
+        setAvailableBatches((prev) => {
+          const combined = Array.from(new Set([...prev, ...res.availableYears.map(String)]));
+          return combined.sort((a, b) => b.localeCompare(a));
+        });
+      }
     } catch (err) {
       console.error('Failed to load students:', err);
       addToast({ title: 'Error', message: 'Failed to load students directory', type: 'error' });
@@ -55,9 +96,48 @@ export default function CoordinatorStudentsPage() {
     }
   };
 
+  // Close year dropdown on outside click
+  useEffect(() => {
+    const handleOutsideClick = (e) => {
+      if (yearDropdownRef.current && !yearDropdownRef.current.contains(e.target)) {
+        setIsYearOpen(false);
+        setYearSearch('');
+      }
+    };
+    if (isYearOpen) {
+      document.addEventListener('mousedown', handleOutsideClick);
+    }
+    return () => {
+      document.removeEventListener('mousedown', handleOutsideClick);
+    };
+  }, [isYearOpen]);
+
+  const allAvailableYears = useMemo(() => {
+    const defaultFallbacks = ['2027', '2026', '2025', '2024'];
+    const combined = Array.from(new Set([...availableBatches, ...defaultFallbacks]));
+    return combined.sort((a, b) => b.localeCompare(a));
+  }, [availableBatches]);
+
+  const filteredYearOptions = useMemo(() => {
+    if (!yearSearch.trim()) return allAvailableYears;
+    const q = yearSearch.trim().toLowerCase();
+    return allAvailableYears.filter((y) => y.toLowerCase().includes(q));
+  }, [allAvailableYears, yearSearch]);
+
   useEffect(() => {
     loadStudents();
-  }, [departmentFilter, yearFilter]);
+  }, [departmentFilter, yearFilter, testFilter]);
+
+  const handleTestFilterChange = (newTestId) => {
+    setTestFilter(newTestId);
+    const next = new URLSearchParams(searchParams);
+    if (newTestId && newTestId !== 'all') {
+      next.set('testId', newTestId);
+    } else {
+      next.delete('testId');
+    }
+    setSearchParams(next);
+  };
 
   const handleSearchSubmit = (e) => {
     e.preventDefault();
@@ -80,6 +160,17 @@ export default function CoordinatorStudentsPage() {
 
   return (
     <div className="space-y-8 max-w-7xl mx-auto pb-16 animate-in fade-in duration-300">
+      {/* Back to Coordinator Dashboard */}
+      <div>
+        <Link
+          to="/coordinator/dashboard"
+          className="inline-flex items-center gap-1.5 text-xs font-semibold text-slate-500 hover:text-teal-600 dark:text-slate-400 dark:hover:text-teal-400 mb-2 transition-colors cursor-pointer"
+        >
+          <ArrowLeft className="w-3.5 h-3.5" />
+          <span>Back to Coordinator Dashboard</span>
+        </Link>
+      </div>
+
       {/* Header */}
       <div>
         <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-teal-50 dark:bg-teal-950/60 border border-teal-200 dark:border-teal-900 text-teal-800 dark:text-teal-300 text-xs font-bold tracking-wider uppercase mb-1">
@@ -93,6 +184,23 @@ export default function CoordinatorStudentsPage() {
           Search registered students, inspect individual test completion rates, analyze strong/weak topics, and track campus placement readiness.
         </p>
       </div>
+
+      {/* Contextual Banner for Accessible Students */}
+      {metric === 'accessible' && (
+        <div className="p-4 rounded-2xl bg-teal-50/90 dark:bg-teal-950/40 border border-teal-200/80 dark:border-teal-900/60 flex items-center gap-3">
+          <div className="p-2 rounded-xl bg-teal-100 dark:bg-teal-900/60 text-teal-700 dark:text-teal-300">
+            <Users className="w-5 h-5" />
+          </div>
+          <div>
+            <h2 className="text-sm font-bold text-teal-900 dark:text-teal-100">
+              Accessible Students Roster
+            </h2>
+            <p className="text-xs text-teal-700 dark:text-teal-300 mt-0.5">
+              Showing registered candidates accessible within your authorized department and institutional scope. Select a mock test to filter candidates eligible for specific drives.
+            </p>
+          </div>
+        </div>
+      )}
 
       {/* Filter and Search Bar */}
       <div className="bg-white dark:bg-slate-800/90 rounded-2xl p-4 sm:p-5 border border-slate-100 dark:border-slate-800 card-shadow flex flex-col md:flex-row md:items-center justify-between gap-4">
@@ -113,27 +221,168 @@ export default function CoordinatorStudentsPage() {
             <select
               value={departmentFilter}
               onChange={(e) => setDepartmentFilter(e.target.value)}
-              className="text-xs py-2 px-3 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-300 focus:outline-hidden focus:ring-2 focus:ring-teal-500"
+              className="text-xs py-2 px-3 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-300 focus:outline-hidden focus:ring-2 focus:ring-teal-500 cursor-pointer"
             >
               <option value="all">All Departments</option>
-              <option value="Computer Science">Computer Science & Eng</option>
-              <option value="Information Technology">Information Technology</option>
-              <option value="Electronics">Electronics Eng</option>
-              <option value="Mechanical">Mechanical Eng</option>
+              {ALLOWED_DEPARTMENTS.map((dept) => (
+                <option key={dept} value={dept}>
+                  {dept}
+                </option>
+              ))}
             </select>
           </div>
 
-          <div className="flex items-center gap-2">
+          {/* Searchable & Typeable Graduation Year Filter */}
+          <div className="flex items-center gap-2 relative" ref={yearDropdownRef}>
             <span className="text-xs text-slate-500 font-medium">Graduation Year:</span>
+            <div className="relative">
+              <button
+                type="button"
+                onClick={() => {
+                  const nextState = !isYearOpen;
+                  setIsYearOpen(nextState);
+                  if (nextState) {
+                    setTimeout(() => yearInputRef.current?.focus(), 50);
+                  }
+                }}
+                className={'text-xs py-2 pl-3 pr-8 rounded-xl border transition-all flex items-center justify-between gap-2 min-w-[145px] cursor-pointer text-left ' + (
+                  yearFilter !== 'all'
+                    ? 'border-teal-500 bg-teal-50/50 dark:bg-teal-950/40 text-teal-900 dark:text-teal-200 font-bold shadow-xs'
+                    : 'border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-300'
+                )}
+              >
+                <div className="flex items-center gap-1.5 truncate">
+                  <Calendar className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                  <span className="truncate">
+                    {yearFilter === 'all' ? 'All Batches' : yearFilter + ' Batch'}
+                  </span>
+                </div>
+                <div className="absolute right-2.5 flex items-center gap-1">
+                  {yearFilter !== 'all' && (
+                    <span
+                      role="button"
+                      tabIndex={0}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setYearFilter('all');
+                        setYearSearch('');
+                        setIsYearOpen(false);
+                      }}
+                      className="p-0.5 rounded-full hover:bg-teal-100 dark:hover:bg-teal-900 text-teal-700 dark:text-teal-300 transition-colors cursor-pointer"
+                      title="Clear graduation year filter"
+                    >
+                      <X className="w-3 h-3" />
+                    </span>
+                  )}
+                  <ChevronDown className={'w-3.5 h-3.5 text-slate-400 transition-transform duration-200 ' + (isYearOpen ? 'rotate-180' : '')} />
+                </div>
+              </button>
+
+              {/* Floating Searchable Dropdown Menu */}
+              {isYearOpen && (
+                <div className="absolute left-0 top-full mt-1.5 z-50 w-56 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 shadow-xl overflow-hidden p-2 space-y-1 animate-in fade-in zoom-in-95 duration-150">
+                  {/* Search / Type Input */}
+                  <div className="relative mb-1">
+                    <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2" />
+                    <input
+                      ref={yearInputRef}
+                      type="text"
+                      placeholder="Type year (e.g. 2026)..."
+                      value={yearSearch}
+                      onChange={(e) => setYearSearch(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Escape') {
+                          setIsYearOpen(false);
+                          setYearSearch('');
+                        } else if (e.key === 'Enter') {
+                          e.preventDefault();
+                          const trimmed = yearSearch.trim();
+                          if (!trimmed || trimmed.toLowerCase() === 'all' || trimmed.toLowerCase() === 'all batches') {
+                            setYearFilter('all');
+                            setYearSearch('');
+                            setIsYearOpen(false);
+                          } else if (allAvailableYears.includes(trimmed)) {
+                            setYearFilter(trimmed);
+                            setYearSearch('');
+                            setIsYearOpen(false);
+                          } else if (filteredYearOptions.length === 1) {
+                            setYearFilter(filteredYearOptions[0]);
+                            setYearSearch('');
+                            setIsYearOpen(false);
+                          }
+                        }
+                      }}
+                      className="w-full pl-8 pr-2.5 py-1.5 text-xs rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-white focus:outline-hidden focus:ring-1 focus:ring-teal-500"
+                    />
+                  </div>
+
+                  {/* Options List */}
+                  <div className="max-h-48 overflow-y-auto space-y-0.5">
+                    {/* All Batches option */}
+                    {(!yearSearch.trim() || 'all batches'.includes(yearSearch.toLowerCase()) || 'all'.includes(yearSearch.toLowerCase())) && (
+                      <div
+                        onClick={() => {
+                          setYearFilter('all');
+                          setYearSearch('');
+                          setIsYearOpen(false);
+                        }}
+                        className={'px-2.5 py-1.5 rounded-lg text-xs cursor-pointer flex items-center justify-between transition-colors ' + (
+                          yearFilter === 'all'
+                            ? 'bg-teal-50 dark:bg-teal-950/60 text-teal-800 dark:text-teal-200 font-bold'
+                            : 'text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'
+                        )}
+                      >
+                        <span>All Batches</span>
+                        {yearFilter === 'all' && <Check className="w-3.5 h-3.5 text-teal-600 dark:text-teal-400" />}
+                      </div>
+                    )}
+
+                    {filteredYearOptions.map((year) => {
+                      const isSelected = String(yearFilter) === String(year);
+                      return (
+                        <div
+                          key={year}
+                          onClick={() => {
+                            setYearFilter(String(year));
+                            setYearSearch('');
+                            setIsYearOpen(false);
+                          }}
+                          className={'px-2.5 py-1.5 rounded-lg text-xs cursor-pointer flex items-center justify-between transition-colors ' + (
+                            isSelected
+                              ? 'bg-teal-50 dark:bg-teal-950/60 text-teal-800 dark:text-teal-200 font-bold'
+                              : 'text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'
+                          )}
+                        >
+                          <span>{year} Batch</span>
+                          {isSelected && <Check className="w-3.5 h-3.5 text-teal-600 dark:text-teal-400" />}
+                        </div>
+                      );
+                    })}
+
+                    {filteredYearOptions.length === 0 && (!yearSearch.trim() || !('all batches'.includes(yearSearch.toLowerCase()) || 'all'.includes(yearSearch.toLowerCase()))) && (
+                      <div className="px-2.5 py-3 text-center text-[11px] text-slate-400 font-medium">
+                        No matching batches
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <span className="text-xs text-slate-500 font-medium">Eligible Test:</span>
             <select
-              value={yearFilter}
-              onChange={(e) => setYearFilter(e.target.value)}
-              className="text-xs py-2 px-3 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-300 focus:outline-hidden focus:ring-2 focus:ring-teal-500"
+              value={testFilter}
+              onChange={(e) => handleTestFilterChange(e.target.value)}
+              className="text-xs py-2 px-3 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-300 focus:outline-hidden focus:ring-2 focus:ring-teal-500 cursor-pointer"
             >
-              <option value="all">All Batches</option>
-              <option value="2026">2026 Batch</option>
-              <option value="2027">2027 Batch</option>
-              <option value="2025">2025 Batch</option>
+              <option value="all">All Mock Tests</option>
+              {mockTestsList.map((t) => (
+                <option key={t._id} value={t._id}>
+                  {t.title} ({t.company || 'General'})
+                </option>
+              ))}
             </select>
           </div>
         </div>

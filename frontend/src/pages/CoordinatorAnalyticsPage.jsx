@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, Link, useSearchParams } from 'react-router-dom';
 import {
+  ArrowLeft,
   BarChart3,
   TrendingUp,
   AlertTriangle,
@@ -21,6 +22,8 @@ export default function CoordinatorAnalyticsPage() {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
+  const metric = searchParams.get('metric');
   const { addToast } = useToast();
 
   useEffect(() => {
@@ -56,9 +59,21 @@ export default function CoordinatorAnalyticsPage() {
   const weakTopics = data?.weakTopics || [];
   const atRiskStudents = data?.atRiskStudents || [];
   const testComparison = data?.testComparison || [];
+  const overallAverageAccuracy = data?.overallAverageAccuracy != null ? data.overallAverageAccuracy : 69;
 
   return (
     <div className="space-y-8 max-w-7xl mx-auto pb-16 animate-in fade-in duration-300">
+      {/* Back to Coordinator Dashboard */}
+      <div>
+        <Link
+          to="/coordinator/dashboard"
+          className="inline-flex items-center gap-1.5 text-xs font-semibold text-slate-500 hover:text-teal-600 dark:text-slate-400 dark:hover:text-teal-400 mb-2 transition-colors cursor-pointer"
+        >
+          <ArrowLeft className="w-3.5 h-3.5" />
+          <span>Back to Coordinator Dashboard</span>
+        </Link>
+      </div>
+
       {/* Header */}
       <div>
         <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-teal-50 dark:bg-teal-950/60 border border-teal-200 dark:border-teal-900 text-teal-800 dark:text-teal-300 text-xs font-bold tracking-wider uppercase mb-1">
@@ -71,6 +86,83 @@ export default function CoordinatorAnalyticsPage() {
         <p className="text-xs sm:text-sm text-slate-500 dark:text-slate-400 mt-1 max-w-2xl">
           Aggregated topic accuracy across completed placement simulations, institutional strength areas, and actionable interventions for candidates needing academic support.
         </p>
+      </div>
+
+      {/* Overall Average Accuracy Banner */}
+      <div className="p-6 rounded-3xl bg-gradient-to-r from-teal-500/10 via-emerald-500/10 to-teal-500/5 dark:from-teal-950/40 dark:via-emerald-950/30 dark:to-teal-950/20 border border-teal-200 dark:border-teal-800 card-shadow flex flex-col md:flex-row md:items-center justify-between gap-6">
+        <div className="space-y-1">
+          <div className="inline-flex items-center gap-2 text-teal-800 dark:text-teal-300 font-extrabold text-xs uppercase tracking-wider">
+            <TrendingUp className="w-4 h-4 text-teal-600 dark:text-teal-400" />
+            Institutional Accuracy Intelligence
+          </div>
+          <h2 className="text-xl sm:text-2xl font-black text-slate-900 dark:text-white">
+            Campus Average Accuracy: {overallAverageAccuracy}%
+          </h2>
+          <p className="text-xs text-slate-500 dark:text-slate-400 max-w-xl">
+            Calculated across completed candidate test attempts within authorized coordinator scope. Demonstrates institutional readiness across quantitative, logical, and verbal aptitude domains.
+          </p>
+        </div>
+        <div className="flex items-center gap-4 self-start md:self-auto">
+          <div className="text-center p-3 px-5 rounded-2xl bg-white dark:bg-slate-800 border border-slate-100 dark:border-slate-700 shadow-xs">
+            <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">Benchmark</span>
+            <span className="text-lg font-black text-emerald-600">≥ 60%</span>
+          </div>
+          <div className="text-center p-3 px-5 rounded-2xl bg-white dark:bg-slate-800 border border-slate-100 dark:border-slate-700 shadow-xs">
+            <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">Readiness</span>
+            <span className="text-lg font-black text-teal-600">{overallAverageAccuracy >= 60 ? 'Placement Ready' : 'Support Needed'}</span>
+          </div>
+        </div>
+      </div>
+
+      {/* Test-Wise Accuracy Breakdown */}
+      <div className="bg-white dark:bg-slate-800/90 rounded-3xl p-6 border border-slate-100 dark:border-slate-800 card-shadow">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-4">
+          <div>
+            <h3 className="text-base font-bold text-slate-900 dark:text-white">
+              Test-Wise Accuracy Breakdown
+            </h3>
+            <p className="text-xs text-slate-400 mt-0.5">
+              Mean score, total attempts, and student accuracy across authorized placement mock tests.
+            </p>
+          </div>
+        </div>
+
+        <div className="overflow-x-auto">
+          {testComparison.length === 0 ? (
+            <div className="py-8 text-center text-xs text-slate-400">No test performance data available yet.</div>
+          ) : (
+            <table className="w-full text-left text-xs">
+              <thead>
+                <tr className="bg-slate-50 dark:bg-slate-900/60 text-slate-400 uppercase font-semibold border-b border-slate-100 dark:border-slate-800">
+                  <th className="py-3 px-4">Mock Test</th>
+                  <th className="py-3 px-4">Company Pattern</th>
+                  <th className="py-3 px-4">Duration</th>
+                  <th className="py-3 px-4">Total Attempts</th>
+                  <th className="py-3 px-4">Average Score</th>
+                  <th className="py-3 px-4">Average Accuracy</th>
+                  <th className="py-3 px-4">Performance Tier</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+                {testComparison.map((t, idx) => (
+                  <tr key={t._id || idx} className="hover:bg-slate-50/50 dark:hover:bg-slate-700/20">
+                    <td className="py-3 px-4 font-bold text-slate-900 dark:text-white">{t.title}</td>
+                    <td className="py-3 px-4 text-slate-600 dark:text-slate-300">{t.company || 'General'}</td>
+                    <td className="py-3 px-4 text-slate-500">{t.durationMinutes} mins ({t.totalQuestions} Qs)</td>
+                    <td className="py-3 px-4 font-mono font-bold text-slate-800 dark:text-slate-200">{t.attemptsCount || 0}</td>
+                    <td className="py-3 px-4 font-mono font-semibold text-slate-700 dark:text-slate-300">{t.averageScore} / {t.totalQuestions}</td>
+                    <td className="py-3 px-4 font-mono font-black text-teal-600 dark:text-teal-400">{t.averageAccuracy}%</td>
+                    <td className="py-3 px-4">
+                      <Badge variant={t.averageAccuracy >= 70 ? 'Passed' : t.averageAccuracy >= 50 ? 'Needs Review' : 'Incomplete'}>
+                        {t.averageAccuracy >= 70 ? 'High' : t.averageAccuracy >= 50 ? 'Moderate' : 'Low'}
+                      </Badge>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
       </div>
 
       {/* Strong vs Weak Highlights */}

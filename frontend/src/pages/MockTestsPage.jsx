@@ -24,11 +24,13 @@ export default function MockTestsPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const companyQuery = searchParams.get('company') || '';
   const typeQuery = searchParams.get('type') || 'all';
+  const statusQuery = searchParams.get('status') || 'all';
 
   const [mockTests, setMockTests] = useState([]);
   const [companies, setCompanies] = useState([]);
   const [selectedType, setSelectedType] = useState(typeQuery);
   const [selectedCompany, setSelectedCompany] = useState(companyQuery);
+  const [selectedStatus, setSelectedStatus] = useState(statusQuery);
   const [loading, setLoading] = useState(true);
 
   // Modal for test start confirmation & instructions
@@ -42,8 +44,10 @@ export default function MockTestsPage() {
   useEffect(() => {
     const cParam = searchParams.get('company') || '';
     const tParam = searchParams.get('type') || 'all';
+    const sParam = searchParams.get('status') || 'all';
     setSelectedCompany(cParam);
     setSelectedType(tParam);
+    setSelectedStatus(sParam);
   }, [searchParams]);
 
   // Load companies for the filter bar
@@ -103,9 +107,19 @@ export default function MockTestsPage() {
     }
   }, [searchParams, mockTests]);
 
+  const handleStatusChange = (statusVal) => {
+    setSelectedStatus(statusVal);
+    const newParams = {};
+    if (statusVal !== 'all') newParams.status = statusVal;
+    if (selectedType !== 'all') newParams.type = selectedType;
+    if (selectedCompany) newParams.company = selectedCompany;
+    setSearchParams(newParams);
+  };
+
   const handleTabChange = (typeVal) => {
     setSelectedType(typeVal);
     const newParams = {};
+    if (selectedStatus !== 'all') newParams.status = selectedStatus;
     if (typeVal !== 'all') newParams.type = typeVal;
     if (selectedCompany) newParams.company = selectedCompany;
     setSearchParams(newParams);
@@ -114,6 +128,7 @@ export default function MockTestsPage() {
   const handleCompanyChange = (compName) => {
     setSelectedCompany(compName);
     const newParams = {};
+    if (selectedStatus !== 'all') newParams.status = selectedStatus;
     if (selectedType !== 'all') newParams.type = selectedType;
     if (compName) newParams.company = compName;
     setSearchParams(newParams);
@@ -122,8 +137,16 @@ export default function MockTestsPage() {
   const handleClearCompany = () => {
     setSelectedCompany('');
     const newParams = {};
+    if (selectedStatus !== 'all') newParams.status = selectedStatus;
     if (selectedType !== 'all') newParams.type = selectedType;
     setSearchParams(newParams);
+  };
+
+  const handleResetAllFilters = () => {
+    setSelectedStatus('all');
+    setSelectedType('all');
+    setSelectedCompany('');
+    setSearchParams({});
   };
 
   const getTestSchedule = (t) => {
@@ -177,8 +200,29 @@ export default function MockTestsPage() {
     }
   };
 
-  // Safe client-side fallback filtering
+  // Compute category counts for status filter bar
+  const counts = {
+    all: mockTests.length,
+    attempted: mockTests.filter((t) => Boolean(t.userAttempt?.attemptId)).length,
+    unattempted: mockTests.filter((t) => !t.userAttempt?.attemptId && !getTestSchedule(t).isClosed).length,
+    closed: mockTests.filter((t) => getTestSchedule(t).isClosed).length
+  };
+
+  // Safe client-side filtering combining status, type, and company filters
   const filteredTests = mockTests.filter((t) => {
+    const { isClosed } = getTestSchedule(t);
+    const hasAttempt = Boolean(t.userAttempt?.attemptId);
+
+    // 1. Status Filter
+    if (selectedStatus === 'attempted') {
+      if (!hasAttempt) return false;
+    } else if (selectedStatus === 'unattempted') {
+      if (hasAttempt || isClosed) return false;
+    } else if (selectedStatus === 'closed') {
+      if (!isClosed) return false;
+    }
+
+    // 2. Type / Category Filter
     const matchesType =
       selectedType === 'all' ||
       t.type === selectedType ||
@@ -186,6 +230,7 @@ export default function MockTestsPage() {
       (selectedType === 'topic_test' && (t.type === 'topic' || t.type === 'topic_test' || t.type === 'grand')) ||
       (selectedType === 'diagnostic' && t.type === 'diagnostic');
 
+    // 3. Company Filter
     const matchesCompany =
       !selectedCompany ||
       (t.company && t.company.toLowerCase() === selectedCompany.toLowerCase());
@@ -229,6 +274,41 @@ export default function MockTestsPage() {
 
       {/* Filter Controls Bar */}
       <div className="space-y-4">
+        {/* Status Filter Tabs (Phase 2) */}
+        <div className="flex items-center gap-2 overflow-x-auto pb-1 scrollbar-none">
+          {[
+            { key: 'all', label: 'All Tests', count: counts.all },
+            { key: 'attempted', label: 'Attempted', count: counts.attempted },
+            { key: 'unattempted', label: 'Unattempted', count: counts.unattempted },
+            { key: 'closed', label: 'Closed', count: counts.closed }
+          ].map((tab) => {
+            const isActive = selectedStatus === tab.key;
+            return (
+              <button
+                key={tab.key}
+                type="button"
+                onClick={() => handleStatusChange(tab.key)}
+                className={`inline-flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold whitespace-nowrap transition-all cursor-pointer ${
+                  isActive
+                    ? 'bg-teal-600 text-white shadow-xs'
+                    : 'bg-white dark:bg-slate-800/90 text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-700/60 border border-slate-200/80 dark:border-slate-700'
+                }`}
+              >
+                <span>{tab.label}</span>
+                <span
+                  className={`px-1.5 py-0.5 rounded-full text-[10px] font-mono font-bold ${
+                    isActive
+                      ? 'bg-white/20 text-white'
+                      : 'bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-300'
+                  }`}
+                >
+                  {tab.count}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+
         {/* Filter Tabs */}
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
           <div className="flex items-center gap-2 overflow-x-auto pb-1 scrollbar-none">
@@ -293,8 +373,14 @@ export default function MockTestsPage() {
               No assessments found
             </h3>
             <p className="text-xs sm:text-sm text-slate-400 max-w-md mx-auto mt-1">
-              {selectedCompany
-                ? `No full mock tests currently configured for ${selectedCompany}. You can reset the filter or start a 10-question practice drill.`
+              {selectedStatus === 'attempted'
+                ? 'No attempted assessments found. Select an available test to begin your practice.'
+                : selectedStatus === 'unattempted'
+                ? 'No unattempted assessments available. You have completed all currently active tests!'
+                : selectedStatus === 'closed'
+                ? 'No closed assessments found. All scheduled assessments are currently active or upcoming.'
+                : selectedCompany
+                ? `No full mock tests currently configured for ${selectedCompany}. You can reset the filter or start a practice drill.`
                 : 'No assessments available under this tab.'}
             </p>
           </div>
@@ -308,7 +394,8 @@ export default function MockTestsPage() {
               </button>
             )}
             <button
-              onClick={() => handleTabChange('all')}
+              type="button"
+              onClick={handleResetAllFilters}
               className="px-5 py-2 rounded-full bg-teal-600 hover:bg-teal-700 text-white text-xs font-bold cursor-pointer"
             >
               View All Assessments

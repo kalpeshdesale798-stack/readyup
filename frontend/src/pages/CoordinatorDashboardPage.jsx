@@ -52,8 +52,8 @@ export default function CoordinatorDashboardPage() {
     return (
       <div className="space-y-8 animate-pulse max-w-7xl mx-auto pb-16">
         <div className="h-10 bg-slate-200 dark:bg-slate-800 rounded-2xl w-1/3" />
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-          {[1, 2, 3, 4, 5, 6, 7, 8].map((i) => (
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+          {[1, 2, 3, 4, 5, 6].map((i) => (
             <div key={i} className="h-28 bg-slate-200 dark:bg-slate-800 rounded-3xl" />
           ))}
         </div>
@@ -63,7 +63,28 @@ export default function CoordinatorDashboardPage() {
   }
 
   // Use upgraded database-backed summary cards if present, fallback to metricCards
-  const summaryCards = data?.summaryCards || data?.metricCards || [];
+  const allSummaryCards = data?.summaryCards || data?.metricCards || [];
+  const cardsToExclude = new Set(['Completed Attempts', 'Completion Rate']);
+  const visibleSummaryCards = allSummaryCards.filter((c) => !cardsToExclude.has(c.label));
+
+  const getCardNavigationPath = (label) => {
+    switch (label) {
+      case 'Accessible Students':
+        return '/coordinator/students?metric=accessible';
+      case 'Available Mock Tests':
+        return '/coordinator/mock-tests?metric=available&status=active';
+      case 'Students Attempted':
+        return '/coordinator/reports?tab=tests&status=attempted';
+      case 'In-Progress Tests':
+        return '/coordinator/reports?tab=tests&status=in-progress';
+      case 'Unattempted Students':
+        return '/coordinator/reports?tab=participation&status=unattempted';
+      case 'Average Accuracy':
+        return '/coordinator/analytics?metric=accuracy';
+      default:
+        return null;
+    }
+  };
   const recentActivity = data?.recentActivity || [];
   const recentImports = data?.importHistory || data?.recentImports || [];
   const metrics = data?.metrics || {};
@@ -119,18 +140,23 @@ export default function CoordinatorDashboardPage() {
         </div>
       </div>
 
-      {/* 8 Database-Backed Metric Cards */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-        {summaryCards.map((m) => (
-          <MetricCard
-            key={m.label}
-            label={m.label}
-            value={m.value}
-            subtext={m.subtext}
-            icon={m.icon}
-            color={m.color}
-          />
-        ))}
+      {/* 6 Clickable Summary Cards (2 rows of 3) */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+        {visibleSummaryCards.map((m) => {
+          const navPath = getCardNavigationPath(m.label);
+          return (
+            <MetricCard
+              key={m.label}
+              label={m.label}
+              value={m.value}
+              subtext={m.subtext}
+              icon={m.icon}
+              color={m.color}
+              onClick={navPath ? () => navigate(navPath) : undefined}
+              ariaLabel={`Open ${m.label} details`}
+            />
+          );
+        })}
       </div>
 
       {/* Quick Navigation Cards */}

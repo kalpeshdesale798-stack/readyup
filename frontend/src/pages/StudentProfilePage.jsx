@@ -11,6 +11,7 @@ import {
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { authService } from '../services/authService';
+import { ALLOWED_DEPARTMENTS } from '../constants/departments';
 import { useToast } from '../context/ToastContext';
 
 export default function StudentProfilePage() {
@@ -172,7 +173,7 @@ export default function StudentProfilePage() {
                 </label>
                 <input
                   type="email"
-                  value={user?.email || 'student@readyup.edu'}
+                  value={user?.email || 'student@kkwagh.edu.in'}
                   readOnly
                   className="w-full px-3.5 py-2.5 text-xs sm:text-sm bg-slate-100 dark:bg-slate-900/40 border border-slate-200 dark:border-slate-800 rounded-xl text-slate-500 cursor-not-allowed"
                 />
@@ -182,15 +183,24 @@ export default function StudentProfilePage() {
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <div>
                 <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1.5">
-                  Department
+                  Department *
                 </label>
-                <input
-                  type="text"
+                <select
                   value={profileForm.department}
                   onChange={(e) => setProfileForm({ ...profileForm, department: e.target.value })}
-                  placeholder="Computer Science & Engineering"
+                  required
                   className="w-full px-3.5 py-2.5 text-xs sm:text-sm bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl focus:outline-hidden focus:border-teal-500 text-slate-900 dark:text-white"
-                />
+                >
+                  <option value="" disabled>Select your department</option>
+                  {profileForm.department && !ALLOWED_DEPARTMENTS.includes(profileForm.department) && (
+                    <option value={profileForm.department}>
+                      {profileForm.department} (Saved)
+                    </option>
+                  )}
+                  {ALLOWED_DEPARTMENTS.map((dept) => (
+                    <option key={dept} value={dept}>{dept}</option>
+                  ))}
+                </select>
               </div>
 
               <div>

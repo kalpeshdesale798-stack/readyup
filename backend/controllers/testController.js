@@ -6,6 +6,7 @@ import Bookmark from "../models/Bookmark.js";
 import User from "../models/User.js";
 import Notification from "../models/Notification.js";
 import { logAuditEvent } from "../utils/auditLogger.js";
+import { ALLOWED_DEPARTMENTS, normalizeDepartment } from "../config/departments.js";
 
 const escapeRegex = (string) => {
     return string ? string.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") : "";
@@ -252,33 +253,42 @@ export const isStudentEligibleForTest = (student, test) => {
         if (hasDirectAssignment) return true;
     }
 
-    const assignedDepts = [
-        ...(Array.isArray(test.assignedDepartments) ? test.assignedDepartments : []),
-        ...(Array.isArray(test.assignedBatches) ? test.assignedBatches : []),
-    ]
-        .map((d) => String(d).trim().toLowerCase())
+    // 1. Department evaluation
+    const rawDepts = (Array.isArray(test.assignedDepartments) && test.assignedDepartments.length > 0)
+        ? test.assignedDepartments
+        : (Array.isArray(test.assignedBatches) ? test.assignedBatches : [])
+            .filter((b) => isNaN(parseInt(b, 10)) && String(b).trim().toLowerCase() !== "all" && String(b).trim().toLowerCase() !== "all batches");
+
+    const deptTokens = rawDepts.map((d) => String(d).trim().toLowerCase()).filter(Boolean);
+    const isDeptOpen = deptTokens.length === 0 || deptTokens.every((d) => d === "all" || d === "all departments");
+
+    let deptMatch = true;
+    if (!isDeptOpen) {
+        const studentDept = (student.department || "").trim().toLowerCase();
+        const normStudentDept = normalizeDepartment(studentDept);
+        deptMatch = deptTokens.some((dept) => {
+            if (!dept) return false;
+            if (dept === studentDept) return true;
+            if (studentDept && (studentDept.includes(dept) || dept.includes(studentDept))) return true;
+            const normDept = normalizeDepartment(dept);
+            if (normDept && normStudentDept && normDept === normStudentDept) return true;
+            return false;
+        });
+    }
+
+    // 2. Batch / Graduation year evaluation
+    const batchTokens = (Array.isArray(test.assignedBatches) ? test.assignedBatches : [])
+        .map((b) => String(b).trim().toLowerCase())
         .filter(Boolean);
 
-    // If no specific departments or batches are restricted, open to all (legacy tests and open mocks)
-    if (assignedDepts.length === 0) return true;
+    const yearTokens = batchTokens.filter((b) => !isNaN(parseInt(b, 10)));
+    let batchMatch = true;
+    if (yearTokens.length > 0) {
+        const studentGradYear = String(student.graduationYear || "").trim();
+        batchMatch = yearTokens.some((year) => year === studentGradYear || parseInt(year, 10) === parseInt(studentGradYear, 10));
+    }
 
-    // If explicit "all" or "all departments" is present
-    if (assignedDepts.includes("all") || assignedDepts.includes("all departments")) return true;
-
-    // Check student department & graduation year
-    const studentDept = (student.department || "").trim().toLowerCase();
-    const studentGradYear = String(student.graduationYear || "");
-
-    const matchesDept = assignedDepts.some((dept) => {
-        if (!dept) return false;
-        return (
-            dept === studentDept ||
-            (studentDept && (studentDept.includes(dept) || dept.includes(studentDept))) ||
-            (studentGradYear && dept === studentGradYear)
-        );
-    });
-
-    return matchesDept;
+    return deptMatch && batchMatch;
 };
 
 export const getMockTests = async (req, res) => {
